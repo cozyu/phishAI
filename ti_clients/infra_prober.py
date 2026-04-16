@@ -10,6 +10,7 @@ import re
 import socket
 import ssl
 import subprocess
+
 from .api_logger import log_api_call
 
 
@@ -30,14 +31,14 @@ def probe_domain(domain: str) -> dict:
                 result["is_cdn"] = True
             elif "elb.amazonaws.com" in cname:
                 result["alb_name"] = cname.split(".")[0]
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log_api_call("InfraProber", "SYSTEM", f"dig +short {domain} CNAME", 0, error=str(e))
 
     try:
         ips = socket.getaddrinfo(domain, None, socket.AF_INET)
         result["ips"] = list(set(addr[4][0] for addr in ips))
-    except Exception:
-        pass
+    except (socket.gaierror, OSError) as e:
+        log_api_call("InfraProber", "SYSTEM", f"getaddrinfo {domain}", 0, error=str(e))
 
     # 2. HTTP 응답 헤더
     try:
@@ -57,8 +58,8 @@ def probe_domain(domain: str) -> dict:
         result["server"] = server if server else None
         if "cloudfront" in result["headers"].get("via", "").lower():
             result["is_cdn"] = True
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log_api_call("InfraProber", "SYSTEM", f"curl -sI https://{domain}", 0, error=str(e))
 
     # 3. SSL 인증서
     try:
@@ -97,8 +98,8 @@ def probe_domain(domain: str) -> dict:
             # SAN (Subject Alternative Names)
             san_match = re.findall(r"DNS:([^\s,]+)", cert_text)
             result["ssl_san"] = sorted(set(san_match))
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log_api_call("InfraProber", "SYSTEM", f"openssl s_client {domain}:443", 0, error=str(e))
 
     return result
 

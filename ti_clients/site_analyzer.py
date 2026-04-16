@@ -9,10 +9,12 @@ Playwright MCP 없이 독립 실행 가능.
 """
 
 import json
+import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path
+
+_UID_GID = f"{os.getuid()}:{os.getgid()}"
 from .api_logger import log_api_call
 
 
@@ -48,7 +50,23 @@ class SiteAnalyzer:
             return False
 
     def dynamic_analyze(self, url: str) -> dict:
-        """Docker 샌드박스 내 Playwright로 동적 분석"""
+        """AI 기반 동적 분석 (실패 시 레거시 폴백)"""
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        if gemini_key and self.docker:
+            try:
+                from .ai_dynamic_analyzer import AIDynamicAnalyzer
+                result = AIDynamicAnalyzer(gemini_key, self.evidence_dir).analyze(url)
+                if "error" not in result:
+                    result["service"] = "SiteAnalyzer-AI"
+                    return result
+                print(f"  [AI동적분석] 레거시로 폴백: {result.get('error', '')[:60]}")
+            except Exception as e:
+                print(f"  [AI동적분석] 레거시로 폴백: {e}")
+
+        return self._dynamic_analyze_legacy(url)
+
+    def _dynamic_analyze_legacy(self, url: str) -> dict:
+        """레거시: Docker 샌드박스 내 Playwright로 동적 분석 (쇼핑몰 특화)"""
         if not self.docker:
             return {"error": "Docker 또는 phishai-sandbox 이미지 없음"}
 
@@ -57,13 +75,12 @@ class SiteAnalyzer:
             result = subprocess.run([
                 "docker", "run", "--rm",
                 "--cap-drop=ALL",
-                "--read-only",
                 "--security-opt=no-new-privileges",
                 "--memory=512m", "--cpus=1",
+                "--user", _UID_GID,
                 "--tmpfs", "/tmp:size=128m",
-                "--tmpfs", "/home/sandbox:size=64m",
                 "-v", f"{edir}:/output",
-                DOCKER_IMAGE, url
+                DOCKER_IMAGE, "sandbox_analyze.py", url
             ], capture_output=True, text=True, timeout=120)
 
             if result.returncode != 0:
@@ -83,69 +100,14 @@ class SiteAnalyzer:
         return {"error": "결과 파일 생성 실패"}
 
     def collect_dom(self, url: str) -> dict:
-        """headless Chrome으로 DOM 수집 + 분석"""
-        if not self.chrome:
-            return {"error": "Chrome not found"}
-
-        # JS로 DOM + 외부 리소스 + 폼 + iframe 정보를 한 번에 추출
-        extract_js = """
-        (async () => {
-            await new Promise(r => setTimeout(r, 3000));
-            const html = document.documentElement.outerHTML;
-            const scripts = [...document.querySelectorAll('script[src]')].map(s => s.src);
-            const iframes = [...document.querySelectorAll('iframe')].map(f => ({src: f.src, id: f.id}));
-            const forms = [...document.querySelectorAll('form')].map(f => ({
-                action: f.action, method: f.method,
-                inputs: [...f.querySelectorAll('input,select,textarea')].map(i => ({
-                    type: i.type, name: i.name, placeholder: i.placeholder
-                }))
-            }));
-            const inputs = [...document.querySelectorAll('input[type="text"],input[type="email"],input[type="tel"],input[type="password"],input[type="number"]')].map(i => ({
-                type: i.type, name: i.name, placeholder: i.placeholder,
-                label: i.closest('label')?.textContent?.trim() || ''
-            }));
-            const links = [...new Set([...html.matchAll(/https?:\\/\\/([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/g)].map(m => m[1]))];
-            const metas = [...document.querySelectorAll('meta')].map(m => ({
-                name: m.name || m.getAttribute('property') || '',
-                content: m.content || ''
-            })).filter(m => m.content);
-            return JSON.stringify({
-                title: document.title,
-                url: location.href,
-                html_size: html.length,
-                external_scripts: scripts,
-                iframes: iframes.filter(f => f.src),
-                forms: forms,
-                input_fields: inputs,
-                external_domains: links.sort(),
-                meta_tags: metas,
-            });
-        })()
-        """
-
-        with tempfile.NamedTemporaryFile(suffix=".js", mode="w", delete=False) as f:
-            f.write(extract_js)
-            js_path = f.name
-
-        try:
-            result = subprocess.run([
-                self.chrome, "--headless", "--disable-gpu", "--no-sandbox",
-                "--disable-software-rasterizer",
-                "--virtual-time-budget=5000",
-                f"--print-to-pdf=/dev/null",
-                url
-            ], capture_output=True, text=True, timeout=15)
-        except subprocess.TimeoutExpired:
-            pass
-
-        # CDP를 사용한 DOM 추출 대신, curl로 HTML을 가져오고 정적 분석
+        """curl 기반 정적 DOM 분석 (Docker 없는 환경에서 사용)"""
         return self._static_dom_analysis(url)
 
     def _static_dom_analysis(self, url: str) -> dict:
         """curl로 HTML을 가져와서 정적 분석"""
         try:
             r = subprocess.run(
-                ["curl", "-sL", "--max-time", "15",
+                ["curl", "-sL", "--compressed", "--max-time", "15",
                  "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                  "-H", "Accept-Language: ko-KR,ko;q=0.9",
                  url],
@@ -228,8 +190,8 @@ class SiteAnalyzer:
                 import base64
                 decoded = base64.b64decode(m).decode("utf-8", errors="ignore")
                 b64_data.append({"encoded": m[:50], "decoded": decoded[:200]})
-            except Exception:
-                pass
+            except (ValueError, UnicodeDecodeError):
+                pass  # 유효하지 않은 base64 데이터는 분석 대상 아님
 
         # meta 태그
         metas = []

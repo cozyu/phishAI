@@ -29,6 +29,26 @@ python3 analyze.py <domain>
 | **분석 총괄 에이전트** | 갭 분석 + 연쇄 분석 자동화 |
 | **PDF 보고서** | 마크다운 보고서를 PDF로 변환 |
 
+## 시스템 요구사항
+
+### 필수
+- Python 3.8+
+- curl
+
+### 권장 (없으면 해당 기능 건너뜀)
+- dig (`dnsutils` 패키지) — DNS MX/NS/TXT/CNAME 조회
+- whois — 도메인 등록 정보 조회
+- openssl — SSL 인증서 SAN 분석 (인프라 프로빙)
+
+### 선택
+- docker — 동적 분석 샌드박스
+- google-chrome 또는 chromium — PDF 보고서 변환
+
+```bash
+# Ubuntu/Debian 설치 예시
+sudo apt install dnsutils whois curl openssl
+```
+
 ## 빠른 시작
 
 ```bash

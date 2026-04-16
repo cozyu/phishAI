@@ -25,6 +25,8 @@ def md_to_html(md_text: str) -> str:
     in_code = False
     in_table = False
     in_ul = False
+    in_ol = False
+    in_blockquote = False
 
     for line in lines:
         # 코드 블록
@@ -49,6 +51,12 @@ def md_to_html(md_text: str) -> str:
             if in_ul:
                 out.append("</ul>")
                 in_ul = False
+            if in_ol:
+                out.append("</ol>")
+                in_ol = False
+            if in_blockquote:
+                out.append("</blockquote>")
+                in_blockquote = False
             out.append("")
             continue
 
@@ -92,7 +100,19 @@ def md_to_html(md_text: str) -> str:
         # 번호 리스트
         m = re.match(r'^(\s*)\d+\.\s+(.*)', line)
         if m:
-            out.append(f"<p class='list-item'>{process_inline(m.group(2))}</p>")
+            if not in_ol:
+                out.append("<ol>")
+                in_ol = True
+            out.append(f"<li>{process_inline(m.group(2))}</li>")
+            continue
+
+        # blockquote
+        m = re.match(r'^>\s?(.*)', line)
+        if m:
+            if not in_blockquote:
+                out.append("<blockquote>")
+                in_blockquote = True
+            out.append(f"<p>{process_inline(m.group(1))}</p>")
             continue
 
         # 수평선
@@ -104,12 +124,22 @@ def md_to_html(md_text: str) -> str:
         if in_ul:
             out.append("</ul>")
             in_ul = False
+        if in_ol:
+            out.append("</ol>")
+            in_ol = False
+        if in_blockquote:
+            out.append("</blockquote>")
+            in_blockquote = False
         out.append(f"<p>{process_inline(line)}</p>")
 
     if in_table:
         out.append("</tbody></table>")
     if in_ul:
         out.append("</ul>")
+    if in_ol:
+        out.append("</ol>")
+    if in_blockquote:
+        out.append("</blockquote>")
 
     return "\n".join(out)
 
@@ -117,6 +147,7 @@ def md_to_html(md_text: str) -> str:
 def process_inline(text: str) -> str:
     """인라인 마크다운 처리 (볼드, 이탤릭, 코드, 링크)"""
     text = html.escape(text)
+    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<strong><em>\1</em></strong>', text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
     text = re.sub(r'`([^`]+)`', r'<code class="inline">\1</code>', text)
@@ -206,8 +237,15 @@ hr {
     border-top: 1px solid #ccc;
     margin: 20px 0;
 }
-ul { padding-left: 20px; }
+ul, ol { padding-left: 20px; }
 li { margin: 3px 0; }
+blockquote {
+    border-left: 4px solid #bdc3c7;
+    margin: 10px 0;
+    padding: 8px 15px;
+    background: #f9f9f9;
+    color: #555;
+}
 strong { color: #c0392b; }
 a { color: #2980b9; text-decoration: none; }
 .list-item { margin: 2px 0; padding-left: 15px; }

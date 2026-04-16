@@ -25,16 +25,21 @@ BASE_DIR = Path(__file__).parent
 EVIDENCE_DIR = BASE_DIR / "evidence"
 REPORTS_DIR = BASE_DIR / "reports"
 
-from ti_clients.gemini_analyzer import GeminiAnalyzer, GEMINI_MODELS, BASE_URL
+from ti_clients.gemini_analyzer import (
+    GeminiAnalyzer, GEMINI_MODELS_LITE, GEMINI_MODELS_STANDARD,
+    BASE_URL, safe_truncate_json,
+)
 import requests
 
 
-def get_gemini_response(api_key: str, prompt: str) -> str:
+def get_gemini_response(api_key: str, prompt: str, tier: str = "standard") -> str:
+    models = GEMINI_MODELS_LITE if tier == "lite" else GEMINI_MODELS_STANDARD
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192}
     }
-    for model in GEMINI_MODELS:
+    last_error = None
+    for model in models:
         url = f"{BASE_URL}/{model}:generateContent?key={api_key}"
         try:
             r = requests.post(url, json=payload, timeout=90)
@@ -42,8 +47,11 @@ def get_gemini_response(api_key: str, prompt: str) -> str:
                 continue
             r.raise_for_status()
             return r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        except Exception:
+        except Exception as e:
+            last_error = e
             continue
+    if last_error:
+        print(f"  [Gemini] 모든 모델 실패: {last_error}")
     return ""
 
 
@@ -108,7 +116,7 @@ def collect_evidence(domain: str, date_str: str) -> dict:
 
 def review_and_identify_gaps(api_key: str, evidence: dict) -> dict:
     """수집된 데이터를 검토하고 추가 조사 필요 항목 식별"""
-    evidence_str = json.dumps(evidence, indent=2, ensure_ascii=False)[:14000]
+    evidence_str = safe_truncate_json(evidence)
 
     prompt = f"""당신은 최고 수준의 사이버 보안 분석 전문가(Chief Analyst)입니다.
 아래는 악성사이트 분석을 위해 수집된 모든 증거 자료입니다.
@@ -140,7 +148,7 @@ def review_and_identify_gaps(api_key: str, evidence: dict) -> dict:
 
 반드시 유효한 JSON만 출력하세요. 설명 텍스트 없이 JSON만."""
 
-    response = get_gemini_response(api_key, prompt)
+    response = get_gemini_response(api_key, prompt, tier="lite")
     # JSON 추출
     try:
         json_match = re.search(r'\{[\s\S]*\}', response)
@@ -226,7 +234,7 @@ def execute_additional_investigation(api_key: str, gap: dict, domain: str, date_
 
 def identify_chain_targets(api_key: str, evidence: dict) -> list:
     """수집 데이터에서 연쇄 분석이 필요한 도메인/IP 목록 추출"""
-    evidence_str = json.dumps(evidence, indent=2, ensure_ascii=False)[:12000]
+    evidence_str = safe_truncate_json(evidence, 12000)
 
     prompt = f"""당신은 사이버 보안 분석 전문가입니다.
 아래 수집 데이터에서 추가 연쇄 분석이 필요한 도메인과 IP를 추출하세요.
@@ -247,7 +255,7 @@ def identify_chain_targets(api_key: str, evidence: dict) -> list:
 
 유효한 JSON 배열만 출력하세요. 최대 5개."""
 
-    response = get_gemini_response(api_key, prompt)
+    response = get_gemini_response(api_key, prompt, tier="lite")
     try:
         json_match = re.search(r'\[[\s\S]*\]', response)
         if json_match:
@@ -292,7 +300,7 @@ def generate_final_report(api_key: str, evidence: dict, review: dict,
         "additional_investigations": additional_results,
         "chain_analysis": chain_results or [],
     }
-    report_str = json.dumps(report_data, indent=2, ensure_ascii=False)[:14000]
+    report_str = safe_truncate_json(report_data)
 
     prompt = f"""당신은 최고 수준의 사이버 보안 분석 전문가(Chief Analyst)입니다.
 아래 모든 분석 결과를 종합하여 최종 분석 보고서를 작성하세요.
@@ -318,14 +326,16 @@ def generate_final_report(api_key: str, evidence: dict, review: dict,
 - 위협 유형: (구체적)
 
 ## 악성 행위 상세
+동적 분석에서 식별된 사이트 유형에 맞게 해당하는 항목을 상세히 분석하세요:
 ### 개인정보 탈취 (어떤 데이터가, 어떤 경로로 수집되는지)
-### 결제 사기 (PG, 카드 정보 처리 흐름)
+### 결제/금융 사기 (결제 흐름, 카드 정보 처리, 가짜 투자/대출 등)
+### 로그인 정보 탈취 (사칭 대상, 크리덴셜 전송 경로)
 ### 사용자 추적/기기 핑거프린팅
 ### 사회공학적 조작 기법
 ### 악성파일 다운로드 / C2 통신 여부
 
-## URL 기반 공격 시나리오
-피해자의 접속부터 금전 피해까지 단계별 URL 흐름을 재현하세요.
+## 공격 시나리오
+피해자의 접속부터 피해 발생까지 단계별 흐름을 재현하세요.
 각 단계마다: URL, 행위, 로드되는 외부 리소스, 수집되는 데이터, 전송 대상 서버를 명시.
 데이터 전송 경로도 다이어그램으로 표현.
 

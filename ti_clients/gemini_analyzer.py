@@ -1,14 +1,72 @@
+import copy
 import json
 import requests
 from .api_logger import log_api_call
 
 
-GEMINI_MODELS = [
-    "gemini-3-flash-preview",
-    "gemini-2.5-flash",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-2.5-flash-lite",
+MAX_PROMPT_DATA_CHARS = 14000
+
+
+def safe_truncate_json(data: dict, max_chars: int = MAX_PROMPT_DATA_CHARS) -> str:
+    """JSON 데이터를 최대 문자 수 이내로 안전하게 축소.
+
+    단순 문자열 슬라이싱 대신, 단계적으로 축소하여 JSON 구조를 유지한다.
+    """
+    full = json.dumps(data, indent=2, ensure_ascii=False)
+    if len(full) <= max_chars:
+        return full
+
+    # 1단계: indent 제거
+    compact = json.dumps(data, ensure_ascii=False)
+    if len(compact) <= max_chars:
+        return compact
+
+    # 2단계: 깊은 복사 후 큰 값을 축소
+    trimmed = copy.deepcopy(data)
+    _trim_recursive(trimmed, max_list=10, max_str=500)
+    result = json.dumps(trimmed, ensure_ascii=False)
+    if len(result) <= max_chars:
+        return result
+
+    # 3단계: 더 공격적으로 축소
+    _trim_recursive(trimmed, max_list=5, max_str=200)
+    result = json.dumps(trimmed, ensure_ascii=False)
+    return result[:max_chars]
+
+
+def _trim_recursive(obj, max_list: int = 10, max_str: int = 500):
+    """dict/list를 재귀적으로 순회하며 큰 값을 축소"""
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            val = obj[key]
+            if isinstance(val, str) and len(val) > max_str:
+                obj[key] = val[:max_str] + "...(truncated)"
+            elif isinstance(val, list):
+                if len(val) > max_list:
+                    obj[key] = val[:max_list]
+                _trim_recursive(obj[key], max_list, max_str)
+            elif isinstance(val, dict):
+                _trim_recursive(val, max_list, max_str)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            if isinstance(item, (dict, list)):
+                _trim_recursive(item, max_list, max_str)
+            elif isinstance(item, str) and len(item) > max_str:
+                obj[i] = item[:max_str] + "...(truncated)"
+
+
+# 용도별 모델 티어
+GEMINI_MODELS_LITE = [
+    "gemini-3.1-flash-lite-preview",  # RPD 500 — 단순 판단, 에이전트 루프용
 ]
+GEMINI_MODELS_STANDARD = [
+    "gemini-3-flash-preview",         # RPD 20 — 최고 성능, 복잡한 종합 분석용
+    "gemini-3.1-flash-lite-preview",  # RPD 500 — 폴백 (2.5 Flash보다 우수)
+    "gemini-2.5-flash",               # RPD 20 — 최종 폴백
+]
+
+# 하위 호환용
+GEMINI_MODELS = GEMINI_MODELS_STANDARD
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -28,7 +86,7 @@ class GeminiAnalyzer:
 도메인: {domain}
 
 ## 수집 데이터
-{json.dumps(collected_data, indent=2, ensure_ascii=False)[:15000]}
+{safe_truncate_json(collected_data)}
 
 ## 요청 출력 형식
 다음 항목을 포함하여 분석해 주세요:
@@ -47,7 +105,7 @@ class GeminiAnalyzer:
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096}
         }
 
-        for model in GEMINI_MODELS:
+        for model in GEMINI_MODELS_STANDARD:
             log_url = f"{BASE_URL}/{model}:generateContent"
             url = f"{log_url}?key={self.api_key}"
             try:

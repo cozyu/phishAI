@@ -1,7 +1,7 @@
 FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
 
 WORKDIR /app
-COPY sandbox_analyze.py .
+COPY sandbox_analyze.py sandbox_agent.py ./
 
 RUN pip install --no-cache-dir playwright==1.52.0 \
     && playwright install chromium
@@ -10,4 +10,5 @@ RUN pip install --no-cache-dir playwright==1.52.0 \
 RUN useradd -m -s /bin/bash sandbox
 USER sandbox
 
-ENTRYPOINT ["python3", "sandbox_analyze.py"]
+ENTRYPOINT ["python3"]
+CMD ["sandbox_analyze.py"]
