@@ -107,7 +107,7 @@ def probe_domain(domain: str) -> dict:
 def probe_infrastructure(domains: list) -> dict:
     """여러 인프라 도메인을 프로빙하여 원본 서버 인프라를 종합 분석"""
     results = {"probes": [], "origin_candidates": [], "scam_network_domains": set(),
-               "alb_names": set(), "non_cdn_servers": []}
+               "alb_names": set(), "non_cdn_servers": [], "san_by_probe": {}}
 
     for domain in domains:
         probe = probe_domain(domain)
@@ -127,10 +127,22 @@ def probe_infrastructure(domains: list) -> dict:
         if probe["alb_name"]:
             results["alb_names"].add(probe["alb_name"])
 
-        # SSL SAN에서 스캠 네트워크 도메인 수집
+        # SSL SAN에서 스캠 네트워크 도메인 수집 (하위 호환 유지)
         for san in probe["ssl_san"]:
             clean = san.lstrip("*.")
             results["scam_network_domains"].add(clean)
+
+        # probe별 SAN 출처 추적 (필터링은 소비 측에서 범용 로직으로 수행)
+        if probe["ssl_san"]:
+            origin_domains = {oc["domain"] for oc in results["origin_candidates"]}
+            results["san_by_probe"][domain] = {
+                "san_domains": sorted(set(s.lstrip("*.") for s in probe["ssl_san"])),
+                "ssl_subject": probe["ssl_subject"],
+                "ssl_issuer": probe["ssl_issuer"],
+                "server": probe["server"],
+                "san_count": len(probe["ssl_san"]),
+                "is_origin": domain in origin_domains,
+            }
 
     # set → list 변환 (JSON 직렬화용)
     results["alb_names"] = sorted(results["alb_names"])

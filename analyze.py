@@ -21,8 +21,9 @@ EVIDENCE_DIR = BASE_DIR / "evidence"
 REPORTS_DIR = BASE_DIR / "reports"
 
 
-def create_evidence_dirs(domain: str, date_str: str) -> Path:
-    edir = EVIDENCE_DIR / f"{domain}_{date_str}"
+def create_evidence_dirs(domain: str, timestamp: str) -> Path:
+    """evidence/<domain>/<timestamp>/ 구조로 증거 폴더 생성"""
+    edir = EVIDENCE_DIR / domain / timestamp
     for sub in ["screenshots", "html", "network", "ti_responses", "dns_whois", "additional_urls"]:
         (edir / sub).mkdir(parents=True, exist_ok=True)
     return edir
@@ -145,8 +146,8 @@ def main():
     args = parser.parse_args()
 
     domain = args.domain.replace("http://", "").replace("https://", "").strip("/")
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    edir = create_evidence_dirs(domain, date_str)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    edir = create_evidence_dirs(domain, timestamp)
 
     env = {k: os.getenv(k, "") for k in [
         "VIRUSTOTAL_API_KEY", "URLSCAN_API_KEY",
@@ -192,8 +193,8 @@ def main():
     else:
         print("[!] GEMINI_API_KEY 없음 - AI 종합 분석 건너뜀")
 
-    # 보고서 저장
-    report_path = REPORTS_DIR / f"{domain}_{date_str}.json"
+    # 보고서 저장 (evidence와 동일 도메인/타임스탬프 구조)
+    report_path = REPORTS_DIR / domain / f"{timestamp}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with open(report_path, "w") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)

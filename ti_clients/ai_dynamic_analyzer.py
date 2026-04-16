@@ -30,9 +30,9 @@ DOCKER_IMAGE = "phishai-sandbox"
 class AIDynamicAnalyzer:
     """AI 에이전트 루프로 동적 분석을 수행하는 오케스트레이터"""
 
-    MAX_STEPS = 7
+    MAX_STEPS = 12
     STEP_TIMEOUT = 15
-    TOTAL_TIMEOUT = 180
+    TOTAL_TIMEOUT = 240
 
     def __init__(self, gemini_api_key: str, evidence_dir: Path):
         self.vision = GeminiVisionClient(gemini_api_key)

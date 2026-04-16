@@ -20,35 +20,39 @@ from .gemini_analyzer import (
 BROWSER_TOOLS = [{
     "functionDeclarations": [
         {
-            "name": "click",
-            "description": "CSS 선택자로 요소를 클릭한다. 링크, 버튼, 입력 필드 등을 클릭할 때 사용.",
+            "name": "click_element",
+            "description": "DOM 목록에서 인덱스로 요소를 클릭한다. links[N] 또는 buttons[N]을 참조. CSS 선택자 추측 없이 실제 존재하는 요소를 정확히 클릭할 수 있다.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "selector": {
+                    "type": {
                         "type": "string",
-                        "description": "클릭할 요소의 CSS 선택자 (예: '#login-btn', 'a.product-link')"
+                        "description": "요소 유형: 'link' (links 목록) 또는 'button' (buttons 목록)"
+                    },
+                    "index": {
+                        "type": "integer",
+                        "description": "DOM 목록에서의 인덱스 번호 (예: links[3]이면 3)"
                     }
                 },
-                "required": ["selector"]
+                "required": ["type", "index"]
             }
         },
         {
-            "name": "fill",
-            "description": "입력 필드에 텍스트를 입력한다. 로그인 폼, 검색창, 개인정보 입력란 등에 사용.",
+            "name": "fill_element",
+            "description": "DOM 목록에서 인덱스로 입력 필드를 선택하고 텍스트를 입력한다. inputs[N]을 참조.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "입력할 요소의 CSS 선택자"
+                    "index": {
+                        "type": "integer",
+                        "description": "inputs 목록에서의 인덱스 번호"
                     },
                     "value": {
                         "type": "string",
-                        "description": "입력할 텍스트 값 (더미 데이터: test@test.com, 01012345678 등)"
+                        "description": "입력할 텍스트 값"
                     }
                 },
-                "required": ["selector", "value"]
+                "required": ["index", "value"]
             }
         },
         {
@@ -67,7 +71,7 @@ BROWSER_TOOLS = [{
         },
         {
             "name": "scroll",
-            "description": "페이지를 스크롤한다. 하단 콘텐츠 확인, 숨겨진 요소 노출 시 사용.",
+            "description": "페이지를 스크롤한다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -80,46 +84,14 @@ BROWSER_TOOLS = [{
             }
         },
         {
-            "name": "hover",
-            "description": "요소에 마우스를 올린다. 드롭다운 메뉴, 숨겨진 요소 노출 시 사용.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "hover할 요소의 CSS 선택자"
-                    }
-                },
-                "required": ["selector"]
-            }
-        },
-        {
-            "name": "select_option",
-            "description": "드롭다운/셀렉트 박스에서 옵션을 선택한다.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "select 요소의 CSS 선택자"
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "선택할 옵션의 value"
-                    }
-                },
-                "required": ["selector", "value"]
-            }
-        },
-        {
             "name": "wait",
-            "description": "페이지 로딩을 기다린다. 클릭/이동 후 콘텐츠 로딩 대기 시 사용.",
+            "description": "페이지 로딩을 기다린다.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "state": {
                         "type": "string",
-                        "description": "대기 상태: networkidle (네트워크 유휴) 또는 domcontentloaded"
+                        "description": "대기 상태: networkidle 또는 domcontentloaded"
                     }
                 },
                 "required": []
@@ -127,7 +99,7 @@ BROWSER_TOOLS = [{
         },
         {
             "name": "done",
-            "description": "분석을 완료하고 최종 결과를 보고한다. 충분한 증거를 수집했을 때 호출.",
+            "description": "분석을 완료하고 최종 결과를 보고한다. 전환 페이지(checkout/login)에 도달했거나 충분한 증거를 수집했을 때 호출.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -150,23 +122,34 @@ BROWSER_TOOLS = [{
     ]
 }]
 
-SYSTEM_PROMPT = """당신은 사이버 보안 분석 전문가입니다. Playwright 브라우저를 제어하여 악성 의심 사이트를 분석합니다.
+SYSTEM_PROMPT = """당신은 사이버 보안 분석 전문가입니다. 악성 의심 사이트를 **피해자의 관점에서** 탐색합니다.
 
-## 분석 목표
-주어진 사이트의 악성 여부를 판별하기 위해 브라우저 도구를 사용하여 사이트를 탐색하세요.
+## 핵심 원칙
+일반 사용자가 이 사이트에 접속했을 때 **자연스럽게 따라갈 경로**를 시뮬레이션하세요.
+매 스텝마다 "피해자라면 무엇을 클릭하겠는가?"를 고려하세요.
 
-## 분석 관점
-- 로그인 폼이 있으면: form action URL 확인, 더미 데이터(test@test.com) 입력 후 전송 경로 추적
-- 쇼핑몰이면: 상품 클릭 → 결제 페이지 진입 → PG/결제 폼 분석
-- 기업 사칭이면: 링크 클릭 → 리다이렉트 체인 추적
-- 개인정보 수집이면: 입력 필드 분석, 데이터 전송 경로 확인
-- 악성 다운로드 유도이면: 다운로드 링크/버튼 확인, 파일 유형 분석
+## 요소 참조 방법
+DOM 요약에 links, buttons, inputs 목록이 인덱스와 함께 제공됩니다.
+**반드시 click_element 도구를 사용하여 인덱스로 요소를 참조하세요.**
+예: links 목록에서 상품 링크가 links[5]이면 → click_element(type="link", index=5)
+예: buttons 목록에서 구매 버튼이 buttons[2]이면 → click_element(type="button", index=2)
+
+## 탐색 전략 (순서대로)
+1. **메인 페이지 파악**: DOM의 links/buttons 목록을 보고 사이트 유형 식별
+2. **핵심 콘텐츠 진입**: 상품/서비스 링크를 click_element로 클릭
+3. **전환 페이지 도달**: "구매하기", "로그인" 등 buttons를 click_element로 클릭하여 결제/입력 페이지에 도달
+4. **전환 페이지 분석**: inputs 목록(개인정보 필드), iframes(결제 게이트웨이), forms(데이터 전송 경로) 확인 후 done 호출
+
+## 사이트 유형별 행동
+- 쇼핑몰: 상품 링크 click_element → 구매 버튼 click_element → checkout 페이지의 inputs/iframes 분석
+- 로그인 피싱: forms의 action URL 확인 → inputs 구조 분석 → done
+- 투자/금융 사기: 가입 버튼 click_element → 입력 폼 도달 → inputs 확인 → done
 
 ## 규칙
-- 매 스텝마다 도구를 하나씩 호출하세요
-- 충분한 증거를 수집했으면 반드시 done 도구를 호출하세요
-- 더미 데이터만 사용하세요 (test@test.com, 01012345678, John Doe 등)
-- 실제 결제를 진행하지 마세요"""
+- **click_element를 우선 사용하세요.** CSS 선택자 기반 click은 실패할 수 있습니다.
+- checkout/결제/로그인 입력 페이지에 도달하면 반드시 done 호출 (더미 데이터 입력 불필요)
+- "about", "FAQ" 같은 정보 페이지는 무시하세요
+- 8스텝 이내에 전환 페이지에 도달하지 못하면 현재까지 수집한 정보로 done 호출"""
 
 
 class GeminiVisionClient:
@@ -250,7 +233,11 @@ class GeminiVisionClient:
         return {"inline_data": {"mime_type": mime, "data": data}}
 
     def _parse_response(self, data: dict, contents: list) -> dict:
-        """Gemini 응답에서 function_call 또는 텍스트를 추출"""
+        """Gemini 응답에서 function_call 또는 텍스트를 추출
+
+        Gemini는 [text, functionCall] 순서로 여러 parts를 반환할 수 있으므로
+        모든 parts를 순회하여 functionCall을 우선 탐색한다.
+        """
         candidates = data.get("candidates", [])
         if not candidates:
             return {"error": "빈 응답"}
@@ -259,11 +246,17 @@ class GeminiVisionClient:
         if not parts:
             return {"error": "빈 parts"}
 
-        part = parts[0]
+        # 모든 parts에서 functionCall을 우선 탐색
+        fc = None
+        text_part = None
+        for part in parts:
+            if "functionCall" in part:
+                fc = part["functionCall"]
+                break
+            elif "text" in part and text_part is None:
+                text_part = part["text"]
 
-        # Function Call 응답
-        if "functionCall" in part:
-            fc = part["functionCall"]
+        if fc:
             name = fc.get("name", "")
             args = fc.get("args", {})
             call_id = fc.get("id", "")
@@ -278,7 +271,6 @@ class GeminiVisionClient:
                 }
 
             # 브라우저 도구 호출
-            # 대화 히스토리에 model의 function_call을 추가
             updated_contents = list(contents)
             updated_contents.append({
                 "role": "model",
@@ -294,11 +286,11 @@ class GeminiVisionClient:
                 "conversation": updated_contents,
             }
 
-        # 텍스트 응답 (도구 호출 없이)
-        if "text" in part:
-            return {"text": part["text"], "conversation": contents}
+        # 텍스트 응답만 (도구 호출 없이)
+        if text_part is not None:
+            return {"text": text_part, "conversation": contents}
 
-        return {"error": f"예상치 못한 응답 형식: {list(part.keys())}"}
+        return {"error": f"예상치 못한 응답 형식: {[list(p.keys()) for p in parts]}"}
 
     def build_function_response(self, conversation: list,
                                 func_name: str, call_id: str,

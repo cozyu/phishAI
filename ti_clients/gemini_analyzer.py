@@ -1,7 +1,22 @@
 import copy
 import json
+import os
 import requests
 from .api_logger import log_api_call
+
+
+def _get_api_keys() -> list[str]:
+    """사용 가능한 Gemini API 키 목록을 반환한다."""
+    keys = []
+    primary = os.getenv("GEMINI_API_KEY", "")
+    if primary:
+        keys.append(primary)
+    # GEMINI_API_KEY_2, _3, ... 순서로 추가
+    for i in range(2, 10):
+        k = os.getenv(f"GEMINI_API_KEY_{i}", "")
+        if k:
+            keys.append(k)
+    return keys
 
 
 MAX_PROMPT_DATA_CHARS = 14000
@@ -57,12 +72,15 @@ def _trim_recursive(obj, max_list: int = 10, max_str: int = 500):
 
 # 용도별 모델 티어
 GEMINI_MODELS_LITE = [
+    "gemini-2.5-flash-lite",  # RPD 20 — 최저 성능, 최저 비용
     "gemini-3.1-flash-lite-preview",  # RPD 500 — 단순 판단, 에이전트 루프용
+    "gemini-2.5-flash",               # RPD 20 — 폴백
 ]
 GEMINI_MODELS_STANDARD = [
     "gemini-3-flash-preview",         # RPD 20 — 최고 성능, 복잡한 종합 분석용
     "gemini-3.1-flash-lite-preview",  # RPD 500 — 폴백 (2.5 Flash보다 우수)
-    "gemini-2.5-flash",               # RPD 20 — 최종 폴백
+    "gemini-2.5-flash",               # RPD 20 — 폴백
+    "gemini-2.5-flash-lite",  # RPD 20 — 최종 폴백
 ]
 
 # 하위 호환용
@@ -77,7 +95,7 @@ class GeminiAnalyzer:
     env_keys = ["GEMINI_API_KEY"]
 
     def __init__(self, api_key: str):
-        self.api_key = api_key
+        self.api_keys = [api_key] + [k for k in _get_api_keys() if k != api_key]
 
     def synthesize(self, domain: str, collected_data: dict) -> dict:
         prompt = f"""당신은 사이버 보안 분석 전문가입니다. 아래 수집된 위협 인텔리전스(TI) 데이터를 종합 분석하여 악성사이트 여부를 판정해 주세요.
@@ -105,25 +123,28 @@ class GeminiAnalyzer:
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096}
         }
 
-        for model in GEMINI_MODELS_STANDARD:
-            log_url = f"{BASE_URL}/{model}:generateContent"
-            url = f"{log_url}?key={self.api_key}"
-            try:
-                r = requests.post(url, json=payload, timeout=60)
-                log_api_call(f"Gemini/{model}", "POST", log_url, r.status_code, response_body=r.text)
-                if r.status_code == 429:
-                    print(f"  [Gemini] {model} 쿼터 초과, 다음 모델 시도...")
+        for api_key in self.api_keys:
+            for model in GEMINI_MODELS_STANDARD:
+                log_url = f"{BASE_URL}/{model}:generateContent"
+                url = f"{log_url}?key={api_key}"
+                try:
+                    r = requests.post(url, json=payload, timeout=60)
+                    log_api_call(f"Gemini/{model}", "POST", log_url, r.status_code, response_body=r.text)
+                    if r.status_code in (429, 503):
+                        reason = "쿼터 초과" if r.status_code == 429 else "서버 과부하"
+                        print(f"  [Gemini] {model} {reason}, 다음 모델 시도...")
+                        continue
+                    r.raise_for_status()
+                    data = r.json()
+                    text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    return {
+                        "service": "Gemini AI Analysis",
+                        "analysis": text,
+                        "model": model,
+                    }
+                except requests.exceptions.HTTPError:
+                    print(f"  [Gemini] {model} 오류, 다음 모델 시도...")
                     continue
-                r.raise_for_status()
-                data = r.json()
-                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                return {
-                    "service": "Gemini AI Analysis",
-                    "analysis": text,
-                    "model": model,
-                }
-            except requests.exceptions.HTTPError:
-                print(f"  [Gemini] {model} 오류, 다음 모델 시도...")
-                continue
+            print(f"  [Gemini] 키 #{self.api_keys.index(api_key)+1} 모든 모델 실패, 다음 키 시도...")
 
-        raise RuntimeError("모든 Gemini 모델 쿼터 초과")
+        raise RuntimeError("모든 Gemini API 키/모델 소진")

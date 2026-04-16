@@ -11,6 +11,10 @@ Docker 컨테이너 내에서 실행. stdin으로 action을 받고 stdout으로 
     - 초기 접속 후 stdout으로 스냅샷 JSON 출력 (1줄)
     - stdin에서 action JSON 수신 (1줄) → 실행 → stdout으로 결과 JSON 출력 (1줄)
     - 반복
+
+DOM 요소 인덱스:
+    스냅샷의 links, buttons, inputs에 인덱스([L0], [B0], [I0])를 부여.
+    AI는 click_element(type="link", index=3) 형태로 실제 존재하는 요소를 참조.
 """
 
 import json
@@ -23,6 +27,9 @@ from playwright.sync_api import sync_playwright
 OUTPUT = Path("/output")
 SCREENSHOTS = OUTPUT / "screenshots"
 HTML_DIR = OUTPUT / "html"
+
+# 마지막 스냅샷의 DOM 요소 참조용 (인덱스 기반 클릭에 사용)
+_last_elements = {"links": [], "buttons": [], "inputs": []}
 
 
 def setup_browser(pw):
@@ -39,7 +46,6 @@ def setup_browser(pw):
                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     )
 
-    # 네트워크 요청 로그
     net_log = []
     context.on("request", lambda req: net_log.append({
         "method": req.method, "url": req.url, "type": req.resource_type,
@@ -50,8 +56,9 @@ def setup_browser(pw):
 
 
 def extract_snapshot(page, net_log: list, name: str) -> dict:
-    """현재 페이지 상태를 스냅샷으로 추출"""
-    # 스크린샷 저장
+    """현재 페이지 상태를 스냅샷으로 추출. DOM 요소에 인덱스 부여."""
+    global _last_elements
+
     SCREENSHOTS.mkdir(parents=True, exist_ok=True)
     screenshot_path = str(SCREENSHOTS / f"{name}.png")
     try:
@@ -59,44 +66,88 @@ def extract_snapshot(page, net_log: list, name: str) -> dict:
     except Exception:
         screenshot_path = ""
 
-    # DOM 요약 추출
     try:
         dom = page.evaluate("""() => {
-            const inputs = [...document.querySelectorAll('input,textarea,select')].map(i => ({
-                type: i.type || 'text', name: i.name, placeholder: i.placeholder,
-                id: i.id, value: i.value ? '(has value)' : ''
-            })).slice(0, 30);
-            const links = [...document.querySelectorAll('a[href]')].map(a => ({
-                text: a.textContent.trim().slice(0, 50), href: a.href
-            })).slice(0, 20);
-            const buttons = [...document.querySelectorAll('button,[role="button"],input[type="submit"]')].map(b => ({
-                text: b.textContent.trim().slice(0, 50),
-                type: b.type || '', id: b.id, className: b.className.slice(0, 50)
-            })).slice(0, 15);
-            const iframes = [...document.querySelectorAll('iframe')].map(f => ({
-                src: f.src, id: f.id, name: f.name
-            })).filter(f => f.src).slice(0, 10);
-            const forms = [...document.querySelectorAll('form')].map(f => ({
-                action: f.action, method: f.method, id: f.id,
-                inputs: [...f.querySelectorAll('input,select,textarea')].map(i => i.name).slice(0, 10)
-            })).slice(0, 5);
-            const scripts = [...document.querySelectorAll('script[src]')].map(s => s.src).slice(0, 15);
+            // 요소의 고유 CSS 선택자 생성
+            function sel(el) {
+                if (el.id) return '#' + CSS.escape(el.id);
+                const tag = el.tagName.toLowerCase();
+                const parent = el.parentElement;
+                if (!parent) return tag;
+                const siblings = [...parent.children].filter(c => c.tagName === el.tagName);
+                const idx = siblings.indexOf(el);
+                const nth = siblings.length > 1 ? ':nth-child(' + ([...parent.children].indexOf(el) + 1) + ')' : '';
+                const cls = el.className && typeof el.className === 'string'
+                    ? '.' + el.className.trim().split(/\\s+/).slice(0, 1).map(c => CSS.escape(c)).join('.')
+                    : '';
+                return tag + cls + nth;
+            }
+
+            const links = [...document.querySelectorAll('a[href]')]
+                .filter(a => a.offsetHeight > 0)
+                .slice(0, 30)
+                .map((a, i) => ({
+                    idx: i, text: a.textContent.trim().slice(0, 60),
+                    href: a.href, _sel: sel(a),
+                    has_image: a.querySelector('img') !== null,
+                }));
+
+            const buttons = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')]
+                .filter(b => b.offsetHeight > 0)
+                .slice(0, 20)
+                .map((b, i) => ({
+                    idx: i, text: (b.textContent || b.value || '').trim().slice(0, 60),
+                    id: b.id, _sel: sel(b),
+                }));
+
+            const inputs = [...document.querySelectorAll('input, textarea, select')]
+                .filter(i => i.offsetHeight > 0 && i.type !== 'hidden')
+                .slice(0, 20)
+                .map((i, i2) => ({
+                    idx: i2, type: i.type || 'text', name: i.name,
+                    placeholder: i.placeholder, id: i.id, _sel: sel(i),
+                }));
+
+            const iframes = [...document.querySelectorAll('iframe')]
+                .filter(f => f.src).slice(0, 10)
+                .map(f => ({src: f.src, id: f.id, name: f.name}));
+
+            const forms = [...document.querySelectorAll('form')].slice(0, 5)
+                .map(f => ({
+                    action: f.action, method: f.method, id: f.id,
+                    inputs: [...f.querySelectorAll('input,select,textarea')]
+                        .map(i => i.name || i.type).slice(0, 10)
+                }));
+
+            const scripts = [...document.querySelectorAll('script[src]')]
+                .map(s => s.src).slice(0, 15);
+
             const domains = [...new Set(
-                [...document.documentElement.outerHTML.matchAll(/https?:\\/\\/([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/g)]
-                .map(m => m[1])
+                [...document.documentElement.outerHTML.matchAll(
+                    /https?:\\/\\/([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/g
+                )].map(m => m[1])
             )].sort().slice(0, 30);
+
             return {
-                title: document.title,
-                url: location.href,
-                inputs, links, buttons, iframes, forms,
-                external_scripts: scripts,
-                external_domains: domains,
+                title: document.title, url: location.href,
+                links, buttons, inputs, iframes, forms,
+                external_scripts: scripts, external_domains: domains,
             };
         }""")
     except Exception as e:
         dom = {"title": "", "url": page.url, "error": str(e)}
 
-    # 최근 네트워크 요청 (마지막 20개)
+    # 인덱스 기반 참조용 선택자 저장 (AI에게는 _sel을 보내지 않음)
+    _last_elements["links"] = [
+        {"sel": l.pop("_sel", ""), **l} for l in dom.get("links", [])
+    ]
+    _last_elements["buttons"] = [
+        {"sel": b.pop("_sel", ""), **b} for b in dom.get("buttons", [])
+    ]
+    _last_elements["inputs"] = [
+        {"sel": i.pop("_sel", ""), **i} for i in dom.get("inputs", [])
+    ]
+
     recent_net = net_log[-20:] if net_log else []
 
     return {
@@ -113,25 +164,62 @@ def execute_action(page, action: dict) -> dict:
     result = {"status": "ok"}
 
     try:
-        if name == "click":
+        if name == "click_element":
+            el_type = args.get("type", "link")  # "link" | "button"
+            index = int(args.get("index", 0))
+            key = "links" if el_type == "link" else "buttons"
+            elements = _last_elements.get(key, [])
+            if index < 0 or index >= len(elements):
+                return {"status": "error",
+                        "error": f"{key}[{index}] 범위 초과 (총 {len(elements)}개)"}
+            sel = elements[index]["sel"]
+            page.click(sel, timeout=10000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                page.wait_for_timeout(2000)
+
+        elif name == "fill_element":
+            index = int(args.get("index", 0))
+            value = args.get("value", "")
+            elements = _last_elements.get("inputs", [])
+            if index < 0 or index >= len(elements):
+                return {"status": "error",
+                        "error": f"inputs[{index}] 범위 초과 (총 {len(elements)}개)"}
+            sel = elements[index]["sel"]
+            page.fill(sel, value, timeout=10000)
+
+        elif name == "click":
+            # 레거시 호환: CSS 선택자 직접 클릭
             page.click(args["selector"], timeout=10000)
-            page.wait_for_load_state("domcontentloaded", timeout=5000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                page.wait_for_timeout(2000)
+
         elif name == "fill":
             page.fill(args["selector"], args["value"], timeout=10000)
+
         elif name == "goto":
             page.goto(args["url"], wait_until="domcontentloaded", timeout=15000)
+
         elif name == "scroll":
             amount = args.get("amount", 500)
             page.evaluate(f"window.scrollBy(0, {int(amount)})")
+
         elif name == "hover":
             page.hover(args["selector"], timeout=10000)
+
         elif name == "select_option":
             page.select_option(args["selector"], args["value"], timeout=10000)
+
         elif name == "wait":
             state = args.get("state", "networkidle")
             page.wait_for_load_state(state, timeout=10000)
+
         else:
             result = {"status": "skipped", "reason": f"unknown action: {name}"}
+
     except Exception as e:
         result = {"status": "error", "error": str(e)[:200]}
 
@@ -155,7 +243,6 @@ def main():
     with sync_playwright() as pw:
         browser, context, page, net_log = setup_browser(pw)
 
-        # 초기 접속
         try:
             page.goto(url, wait_until="networkidle", timeout=20000)
         except Exception:
@@ -166,18 +253,15 @@ def main():
                 browser.close()
                 sys.exit(1)
 
-        # HTML 저장
         HTML_DIR.mkdir(parents=True, exist_ok=True)
         try:
             (HTML_DIR / "index.html").write_text(page.content(), encoding="utf-8")
         except Exception:
             pass
 
-        # 초기 스냅샷 출력
         snapshot = extract_snapshot(page, net_log, "initial")
         emit(snapshot)
 
-        # 에이전트 루프: stdin에서 action 수신 → 실행 → 스냅샷 출력
         step = 0
         for line in sys.stdin:
             line = line.strip()
@@ -191,15 +275,11 @@ def main():
                 continue
 
             step += 1
-
-            # action 실행
             action_result = execute_action(page, action)
 
-            # 실행 후 스냅샷
             snapshot = extract_snapshot(page, net_log, f"step_{step}")
             snapshot["action_result"] = action_result
 
-            # HTML 저장 (각 스텝)
             try:
                 (HTML_DIR / f"step_{step}.html").write_text(
                     page.content(), encoding="utf-8")
@@ -208,7 +288,6 @@ def main():
 
             emit(snapshot)
 
-        # 네트워크 로그 전체 저장
         net_dir = OUTPUT / "network"
         net_dir.mkdir(parents=True, exist_ok=True)
         with open(net_dir / "agent_requests.json", "w") as f:
