@@ -15,6 +15,8 @@ python3 analyze.py <domain>
       — AI 에이전트가 피해자 관점에서 사이트를 탐색
       — 상품 링크 → CTA 버튼 → checkout/로그인 페이지까지 자동 진입
       — DOM 요소에 data-phishai-idx 부여, 메타데이터 기반 클릭
+      — victim_flow(방문 페이지, iframe, PII 입력 필드, form action) 누적 수집
+        → ti_responses/dynamic_result.json 에 저장되어 최종 보고서의 핵심 증거로 활용
   [6] Gemini AI 종합 판정
   → evidence/ 에 원본 자료 저장, JSON 보고서 + 콘솔 요약
 ```

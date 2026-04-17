@@ -614,9 +614,25 @@ def extract_evidence_summary(evidence: dict) -> dict:
         summary["dynamic_analysis"] = {
             "site_type": dynamic.get("site_type"),
             "severity": dynamic.get("severity"),
-            "findings": dynamic.get("findings", "")[:500],
+            "findings": dynamic.get("findings", "")[:800],
             "rounds_completed": dynamic.get("rounds_completed"),
         }
+        # AI 에이전트가 탐색 중 수집한 victim_flow (checkout/결제/입력 페이지 증거)
+        vf = dynamic.get("victim_flow", {})
+        if vf:
+            summary["victim_flow"] = {
+                "visited_pages": vf.get("visited_pages", [])[:10],
+                "iframes": vf.get("iframes", [])[:15],
+                "input_fields": vf.get("input_fields", [])[:30],
+                "forms": vf.get("forms", [])[:10],
+                "external_domains": vf.get("external_domains", [])[:40],
+            }
+        history = dynamic.get("history", [])
+        if history:
+            summary["dynamic_analysis"]["action_history"] = [
+                f"Step {h.get('step')}: {h.get('action')}({json.dumps(h.get('args', {}), ensure_ascii=False)[:60]}) -> {h.get('result')}"
+                for h in history[:15]
+            ]
 
     return summary
 
@@ -703,6 +719,13 @@ def generate_final_report(api_key: str, evidence: dict, review: dict,
 ## 3. 직접 접근 분석
 사이트 구조, 방문 페이지 제목, 기재된 업체 정보, 네트워크 요청에서 관찰된 외부 도메인.
 DOM 분석의 platform 정보, input_fields, suspicious_patterns 인용.
+**반드시 `victim_flow` 데이터를 활용하세요:**
+- `visited_pages`: AI 에이전트가 실제로 탐색한 페이지 경로 (메인 → 상품 → checkout 등)
+- `iframes`: 결제/로그인 iframe의 src (예: Airwallex, Stripe 같은 결제 GW 식별)
+- `input_fields`: checkout/로그인 페이지에서 수집되는 입력 필드 (type/name/placeholder)
+- `forms`: form action URL → 실제 데이터가 전송되는 서버 파악
+- `dynamic_analysis.action_history`: AI 에이전트가 수행한 행동 단계별 기록 (어떤 버튼을 눌러 어디에 도달했는지)
+이 데이터를 근거로 "AI 에이전트가 X 페이지까지 자동 탐색했고, 결제 iframe Y 또는 입력 필드 Z가 확인됨"처럼 구체적으로 서술하세요.
 
 ## 4. 핵심 악성 근거
 증거 데이터에 기반한 구체적 악성 근거를 번호 매겨 나열. 각 근거에 증거 인용 필수.

@@ -43,8 +43,10 @@ class AIDynamicAnalyzer:
 
         Returns:
             {"site_type": str, "findings": str, "severity": str,
-             "rounds_completed": int, "history": list}
+             "rounds_completed": int, "history": list, "victim_flow": dict}
             또는 {"error": str}
+
+        결과는 evidence_dir/ti_responses/dynamic_result.json 에도 저장된다.
         """
         edir = str(self.evidence_dir.resolve())
         start_time = time.time()
@@ -73,13 +75,26 @@ class AIDynamicAnalyzer:
             return {"error": "Docker를 찾을 수 없음"}
 
         try:
-            return self._run_agent_loop(proc, start_time)
+            result = self._run_agent_loop(proc, start_time)
         finally:
             proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+        self._save_result(result)
+        return result
+
+    def _save_result(self, result: dict) -> None:
+        """동적 분석 결과를 evidence/.../ti_responses/dynamic_result.json 에 기록"""
+        try:
+            out_dir = self.evidence_dir / "ti_responses"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with open(out_dir / "dynamic_result.json", "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"  [AI동적분석] 결과 파일 저장 실패: {e}")
 
     def _run_agent_loop(self, proc: subprocess.Popen, start_time: float) -> dict:
         """에이전트 루프 실행"""
@@ -93,6 +108,16 @@ class AIDynamicAnalyzer:
         # 2. Gemini에 초기 스크린샷 + DOM 전달
         conversation = None
         history = []
+
+        # 탐색 중 발견한 victim_flow 증거 누적
+        # — checkout 페이지의 iframe/inputs/forms가 최종 보고서의 핵심 증거가 됨
+        visited_pages: list[dict] = []
+        iframes_seen: list[dict] = []
+        inputs_seen: list[dict] = []
+        forms_seen: list[dict] = []
+        external_domains: set[str] = set()
+        self._accumulate(initial, visited_pages, iframes_seen, inputs_seen,
+                         forms_seen, external_domains)
 
         for step in range(self.MAX_STEPS):
             # 타임아웃 체크
@@ -127,6 +152,13 @@ class AIDynamicAnalyzer:
                     "severity": response.get("severity", "medium"),
                     "rounds_completed": step + 1,
                     "history": history,
+                    "victim_flow": {
+                        "visited_pages": visited_pages,
+                        "iframes": iframes_seen,
+                        "input_fields": inputs_seen,
+                        "forms": forms_seen,
+                        "external_domains": sorted(external_domains),
+                    },
                 }
 
             # Function Call 처리
@@ -154,6 +186,10 @@ class AIDynamicAnalyzer:
             if "error" in result_snapshot:
                 print(f"  [AI동적분석] Docker 오류: {result_snapshot['error']}")
                 break
+
+            # victim_flow 증거 누적 (새 스냅샷의 iframes/inputs/forms/domains)
+            self._accumulate(result_snapshot, visited_pages, iframes_seen,
+                             inputs_seen, forms_seen, external_domains)
 
             # 실행 결과를 히스토리에 기록
             action_result = result_snapshot.get("action_result", {})
@@ -187,7 +223,65 @@ class AIDynamicAnalyzer:
             "severity": "medium",
             "rounds_completed": len(history),
             "history": history,
+            "victim_flow": {
+                "visited_pages": visited_pages,
+                "iframes": iframes_seen,
+                "input_fields": inputs_seen,
+                "forms": forms_seen,
+                "external_domains": sorted(external_domains),
+            },
         }
+
+    @staticmethod
+    def _accumulate(snapshot: dict, visited_pages: list, iframes: list,
+                    inputs: list, forms: list, domains: set) -> None:
+        """스냅샷의 victim_flow 증거를 누적한다. 중복 항목은 제거."""
+        dom = snapshot.get("dom", {})
+        page_url = dom.get("url", "")
+        if page_url and not any(p.get("url") == page_url for p in visited_pages):
+            visited_pages.append({
+                "url": page_url,
+                "title": dom.get("title", ""),
+            })
+
+        for ifr in dom.get("iframes", []) or []:
+            src = ifr.get("src", "")
+            if src and src != "about:blank" and not any(i.get("src") == src for i in iframes):
+                iframes.append({
+                    "src": src, "id": ifr.get("id", ""),
+                    "name": ifr.get("name", ""),
+                    "on_page": page_url,
+                })
+
+        for inp in dom.get("inputs", []) or []:
+            t = inp.get("type", "text")
+            name = inp.get("name", "")
+            placeholder = inp.get("placeholder", "")
+            key = f"{page_url}|{t}|{name}|{placeholder}"
+            if t == "hidden":
+                continue
+            if not any(key == f"{i.get('on_page','')}|{i.get('type','')}|{i.get('name','')}|{i.get('placeholder','')}"
+                       for i in inputs):
+                inputs.append({
+                    "type": t, "name": name, "placeholder": placeholder,
+                    "id": inp.get("id", ""),
+                    "on_page": page_url,
+                })
+
+        for form in dom.get("forms", []) or []:
+            action = form.get("action", "")
+            key = f"{page_url}|{action}"
+            if not any(key == f"{f.get('on_page','')}|{f.get('action','')}" for f in forms):
+                forms.append({
+                    "action": action,
+                    "method": form.get("method", ""),
+                    "inputs": form.get("inputs", []),
+                    "on_page": page_url,
+                })
+
+        for d in dom.get("external_domains", []) or []:
+            if d:
+                domains.add(d)
 
     def _read_snapshot(self, proc: subprocess.Popen) -> dict:
         """Docker 컨테이너에서 스냅샷 JSON 1줄 읽기"""

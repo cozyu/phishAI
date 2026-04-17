@@ -49,4 +49,4 @@ NordVPN 연결 후 Playwright MCP로 사이트 직접 접근 가능:
 ## 주의사항
 - .env 파일은 절대 커밋하지 않음 (.gitignore에 포함)
 - evidence/, reports/ 폴더도 gitignore 대상
-- sudo, rm 명령어는 사용하지 않음
+- sudo, rm 명령어가 필요하면 사용자에게 요청하기
