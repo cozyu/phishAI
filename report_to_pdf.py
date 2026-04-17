@@ -326,6 +326,12 @@ def main():
     parser.add_argument("input", help="입력 마크다운 파일 경로")
     parser.add_argument("-o", "--output", help="출력 PDF 파일 경로 (기본: 입력파일명.pdf)")
     args = parser.parse_args()
+
+    from ti_clients.api_logger import setup_run_logger
+    from pathlib import Path as _P
+    log_path = setup_run_logger("report_to_pdf", _P(args.input).stem)
+    print(f"[*] 실행 로그: {log_path}")
+
     convert(args.input, args.output)
 
 

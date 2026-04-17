@@ -146,6 +146,11 @@ def main():
     args = parser.parse_args()
 
     domain = args.domain.replace("http://", "").replace("https://", "").strip("/")
+
+    from ti_clients.api_logger import setup_run_logger
+    log_path = setup_run_logger("analyze", domain)
+    print(f"[*] 실행 로그: {log_path}")
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     edir = create_evidence_dirs(domain, timestamp)
 

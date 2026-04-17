@@ -129,27 +129,41 @@ SYSTEM_PROMPT = """당신은 사이버 보안 분석 전문가입니다. 악성 
 매 스텝마다 "피해자라면 무엇을 클릭하겠는가?"를 고려하세요.
 
 ## 요소 참조 방법
-DOM 요약에 links, buttons, inputs 목록이 인덱스와 함께 제공됩니다.
-**반드시 click_element 도구를 사용하여 인덱스로 요소를 참조하세요.**
-예: links 목록에서 상품 링크가 links[5]이면 → click_element(type="link", index=5)
-예: buttons 목록에서 구매 버튼이 buttons[2]이면 → click_element(type="button", index=2)
+DOM 요약의 links/buttons/inputs 각 항목에 idx 인덱스가 있습니다.
+**반드시 click_element(type, index)로 참조하세요.** CSS 선택자 추측은 금지.
 
-## 탐색 전략 (순서대로)
-1. **메인 페이지 파악**: DOM의 links/buttons 목록을 보고 사이트 유형 식별
-2. **핵심 콘텐츠 진입**: 상품/서비스 링크를 click_element로 클릭
-3. **전환 페이지 도달**: "구매하기", "로그인" 등 buttons를 click_element로 클릭하여 결제/입력 페이지에 도달
-4. **전환 페이지 분석**: inputs 목록(개인정보 필드), iframes(결제 게이트웨이), forms(데이터 전송 경로) 확인 후 done 호출
+## 버튼/링크의 메타데이터 해석 (중요)
+각 요소는 다음 힌트를 가집니다. 이를 활용해 **핵심 CTA를 다른 반복 요소와 구별**하세요:
+- `same_text_count`: 페이지 내 동일 텍스트 버튼 수.
+  - 값이 크다(예: 10+) → 상품 카드/리스트 반복 요소. **개별 항목 탐색이 아니라 전환 흐름 진입을 원한다면 피하세요.**
+  - 값이 1 → 페이지 고유 CTA일 가능성 높음. 전환 페이지로 이어질 가능성이 큽니다.
+- `y_band`: 'top' / 'middle' / 'bottom' — 주요 CTA는 대개 middle 또는 bottom.
+- `size`: 'large' / 'medium' / 'small' — 전환 CTA는 보통 large.
+- `text`: 짧고 일반적인 단어("구매", "구입") + 높은 same_text_count → 카드 버튼.
+          긴 문구("바로 구매하기", "결제하기", "지금 주문") + same_text_count=1 → 메인 CTA.
+
+## 스크린샷과 DOM 교차 검증
+- 스크린샷에서 **눈에 띄는 큰 단일 CTA 버튼**을 먼저 식별하세요.
+- 그 텍스트를 DOM buttons 목록에서 찾아 매칭되는 idx를 선택하세요.
+- 동일 텍스트가 많다면(same_text_count>3) 스크린샷의 위치(중앙/하단 대형 버튼)를 기준으로 선택.
+- 필요하면 scroll 도구로 페이지 아래쪽을 확인한 후 재판단.
+
+## 탐색 전략
+1. **메인 페이지 파악**: links/buttons 메타데이터로 사이트 유형 식별.
+2. **핵심 콘텐츠 진입**: 상품/서비스 링크 클릭.
+3. **전환 페이지 도달**: 메인 CTA 버튼을 찾아 클릭해 결제/로그인/입력 페이지로 진입.
+4. **전환 페이지 분석**: inputs(개인정보/카드 필드), iframes(결제 GW), forms(전송 경로) 확인 후 done.
 
 ## 사이트 유형별 행동
-- 쇼핑몰: 상품 링크 click_element → 구매 버튼 click_element → checkout 페이지의 inputs/iframes 분석
-- 로그인 피싱: forms의 action URL 확인 → inputs 구조 분석 → done
-- 투자/금융 사기: 가입 버튼 click_element → 입력 폼 도달 → inputs 확인 → done
+- 쇼핑몰: 상품 링크 → 메인 CTA('바로 구매하기' 등, same_text_count=1) → checkout 분석
+- 로그인 피싱: forms/inputs 구조 분석 → done
+- 투자/금융 사기: 가입/시작 CTA → 입력 폼 → done
 
 ## 규칙
-- **click_element를 우선 사용하세요.** CSS 선택자 기반 click은 실패할 수 있습니다.
-- checkout/결제/로그인 입력 페이지에 도달하면 반드시 done 호출 (더미 데이터 입력 불필요)
-- "about", "FAQ" 같은 정보 페이지는 무시하세요
-- 8스텝 이내에 전환 페이지에 도달하지 못하면 현재까지 수집한 정보로 done 호출"""
+- 실패(error/skipped) 시 **같은 인덱스를 재시도하지 말고**, 메타데이터를 재검토해 다른 후보를 선택.
+- checkout/결제/로그인 입력 페이지에 도달하면 반드시 done 호출 (더미 데이터 입력 불필요).
+- "about", "FAQ" 같은 정보 페이지는 무시.
+- 10스텝 이내에 전환 페이지에 도달하지 못하면 현재까지 수집한 정보로 done."""
 
 
 class GeminiVisionClient:
@@ -174,8 +188,8 @@ class GeminiVisionClient:
         if not image_part:
             return {"error": f"스크린샷 로드 실패: {screenshot_path}"}
 
-        # DOM 요약 텍스트
-        dom_text = safe_truncate_json(dom_summary, max_chars=6000)
+        # DOM 요약 텍스트 — 동적 분석에서는 모든 interactive 요소를 AI에게 전달해야 하므로 넉넉히
+        dom_text = safe_truncate_json(dom_summary, max_chars=30000)
 
         # 대화 히스토리 구성
         if conversation is None:

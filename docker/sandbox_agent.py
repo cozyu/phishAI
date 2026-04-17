@@ -68,45 +68,88 @@ def extract_snapshot(page, net_log: list, name: str) -> dict:
 
     try:
         dom = page.evaluate("""() => {
-            // 요소의 고유 CSS 선택자 생성
-            function sel(el) {
-                if (el.id) return '#' + CSS.escape(el.id);
-                const tag = el.tagName.toLowerCase();
-                const parent = el.parentElement;
-                if (!parent) return tag;
-                const siblings = [...parent.children].filter(c => c.tagName === el.tagName);
-                const idx = siblings.indexOf(el);
-                const nth = siblings.length > 1 ? ':nth-child(' + ([...parent.children].indexOf(el) + 1) + ')' : '';
-                const cls = el.className && typeof el.className === 'string'
-                    ? '.' + el.className.trim().split(/\\s+/).slice(0, 1).map(c => CSS.escape(c)).join('.')
-                    : '';
-                return tag + cls + nth;
+            // 이전 phishai-idx 태그 제거
+            document.querySelectorAll('[data-phishai-idx]').forEach(
+                e => e.removeAttribute('data-phishai-idx')
+            );
+
+            const visible = el => el.offsetHeight > 0 && el.offsetWidth > 0;
+            const vh = window.innerHeight || 900;
+            const vw = window.innerWidth || 1280;
+
+            // y_band: 페이지 상/중/하 위치를 문자열로 (CTA는 주로 middle/bottom)
+            function yBand(rect) {
+                const centerY = rect.top + rect.height / 2;
+                if (centerY < vh * 0.33) return 'top';
+                if (centerY < vh * 0.67) return 'middle';
+                return 'bottom';
             }
 
+            // 크기 분류: 상대적으로 큰 요소는 CTA 가능성 높음
+            function sizeClass(rect) {
+                const area = rect.width * rect.height;
+                if (area > 20000) return 'large';
+                if (area > 5000) return 'medium';
+                return 'small';
+            }
+
+            // 텍스트별 등장 횟수 맵 (AI가 중복 버튼을 판별할 근거)
+            const buttonTextFreq = {};
+            const allBtns = [...document.querySelectorAll(
+                'button, [role="button"], input[type="submit"]'
+            )].filter(visible);
+            for (const b of allBtns) {
+                const t = (b.textContent || b.value || '').trim().slice(0, 80);
+                buttonTextFreq[t] = (buttonTextFreq[t] || 0) + 1;
+            }
+
+            // 모든 visible 요소를 AI에게 전달 (인위적 slice 없음)
+            // — 대형 페이지의 pathological case 방지용 상한선만 500으로 설정
+            const HARD_CAP = 500;
+
+            // Links
             const links = [...document.querySelectorAll('a[href]')]
-                .filter(a => a.offsetHeight > 0)
-                .slice(0, 30)
-                .map((a, i) => ({
-                    idx: i, text: a.textContent.trim().slice(0, 60),
-                    href: a.href, _sel: sel(a),
-                    has_image: a.querySelector('img') !== null,
-                }));
+                .filter(visible)
+                .slice(0, HARD_CAP)
+                .map((a, i) => {
+                    a.setAttribute('data-phishai-idx', 'link-' + i);
+                    const r = a.getBoundingClientRect();
+                    return {
+                        idx: i,
+                        text: a.textContent.trim().slice(0, 80),
+                        href: a.href,
+                        has_image: a.querySelector('img') !== null,
+                        y_band: yBand(r),
+                    };
+                });
 
-            const buttons = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')]
-                .filter(b => b.offsetHeight > 0)
-                .slice(0, 20)
-                .map((b, i) => ({
-                    idx: i, text: (b.textContent || b.value || '').trim().slice(0, 60),
-                    id: b.id, _sel: sel(b),
-                }));
+            // Buttons — 메타데이터(same_text_count, y_band, size)로 AI 판단 지원
+            const buttons = allBtns.slice(0, HARD_CAP).map((b, i) => {
+                b.setAttribute('data-phishai-idx', 'button-' + i);
+                const r = b.getBoundingClientRect();
+                const text = (b.textContent || b.value || '').trim().slice(0, 80);
+                return {
+                    idx: i,
+                    text,
+                    id: b.id,
+                    tag: b.tagName.toLowerCase(),
+                    same_text_count: buttonTextFreq[text] || 1,
+                    y_band: yBand(r),
+                    size: sizeClass(r),
+                };
+            });
 
+            // Inputs
             const inputs = [...document.querySelectorAll('input, textarea, select')]
-                .filter(i => i.offsetHeight > 0 && i.type !== 'hidden')
-                .slice(0, 20)
-                .map((i, i2) => ({
-                    idx: i2, type: i.type || 'text', name: i.name,
-                    placeholder: i.placeholder, id: i.id, _sel: sel(i),
-                }));
+                .filter(i => visible(i) && i.type !== 'hidden')
+                .slice(0, HARD_CAP)
+                .map((i, idx) => {
+                    i.setAttribute('data-phishai-idx', 'input-' + idx);
+                    return {
+                        idx, type: i.type || 'text', name: i.name,
+                        placeholder: i.placeholder, id: i.id,
+                    };
+                });
 
             const iframes = [...document.querySelectorAll('iframe')]
                 .filter(f => f.src).slice(0, 10)
@@ -137,16 +180,10 @@ def extract_snapshot(page, net_log: list, name: str) -> dict:
     except Exception as e:
         dom = {"title": "", "url": page.url, "error": str(e)}
 
-    # 인덱스 기반 참조용 선택자 저장 (AI에게는 _sel을 보내지 않음)
-    _last_elements["links"] = [
-        {"sel": l.pop("_sel", ""), **l} for l in dom.get("links", [])
-    ]
-    _last_elements["buttons"] = [
-        {"sel": b.pop("_sel", ""), **b} for b in dom.get("buttons", [])
-    ]
-    _last_elements["inputs"] = [
-        {"sel": i.pop("_sel", ""), **i} for i in dom.get("inputs", [])
-    ]
+    # 인덱스 기반 참조용 (클릭/입력 시 data-phishai-idx 속성으로 고유 선택)
+    _last_elements["links"] = list(dom.get("links", []))
+    _last_elements["buttons"] = list(dom.get("buttons", []))
+    _last_elements["inputs"] = list(dom.get("inputs", []))
 
     recent_net = net_log[-20:] if net_log else []
 
@@ -172,7 +209,11 @@ def execute_action(page, action: dict) -> dict:
             if index < 0 or index >= len(elements):
                 return {"status": "error",
                         "error": f"{key}[{index}] 범위 초과 (총 {len(elements)}개)"}
-            sel = elements[index]["sel"]
+            sel = f'[data-phishai-idx="{el_type}-{index}"]'
+            try:
+                page.locator(sel).scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
             page.click(sel, timeout=10000)
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=5000)
@@ -186,7 +227,7 @@ def execute_action(page, action: dict) -> dict:
             if index < 0 or index >= len(elements):
                 return {"status": "error",
                         "error": f"inputs[{index}] 범위 초과 (총 {len(elements)}개)"}
-            sel = elements[index]["sel"]
+            sel = f'[data-phishai-idx="input-{index}"]'
             page.fill(sel, value, timeout=10000)
 
         elif name == "click":

@@ -820,9 +820,13 @@ def main():
     domain = args.domain
     date_str = args.date
 
+    from ti_clients.api_logger import setup_run_logger
+    log_path = setup_run_logger("analyst_agent", domain)
+
     print(f"{'='*60}")
     print(f"  phishAI 분석 총괄 에이전트 (Chief Analyst)")
     print(f"  대상: {domain} | 일시: {date_str}")
+    print(f"  실행 로그: {log_path}")
     print(f"{'='*60}")
 
     # 1단계: 수집 데이터 로드
