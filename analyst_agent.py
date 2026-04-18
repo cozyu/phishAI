@@ -201,19 +201,16 @@ _PASS1_PROMPT = """당신은 최고 수준의 사이버 보안 분석 전문가(
 
 ### 5-4. 사용자 행동 추적 (Behavioral Tracking)
 **4개 bullet 형식**:
-- `/statistics/md.gif?tracking_data=...` — 페이지 진입/이탈/클릭/구매 이벤트를 1px GIF로 추적. (아래 코드블록에 `victim_flow.tracking_requests`의 **모든 URL 전체 나열**)
+- `/statistics/md.gif?tracking_data=...` — 페이지 진입/이탈/클릭/구매 이벤트를 1px GIF로 추적.
 - `arms-retcode.aliyuncs.com` 등 외부 행동분석 플랫폼 — 역할 설명.
 - **추적 이벤트**: URL의 eventName 파라미터에서 관찰된 **모든 이벤트명 나열** (예: `enter`, `leave`, `DOMContentLoaded`, `buyNow`, `addToCart`, `openRepeatOrder`). 가능한 한 많이 추출.
 - **강조**: "공격자가 피해자의 구매 여정을 실시간으로 모니터링".
 
-tracking URL 코드블록 예시:
-```
-(중복 제거 없이 전부 나열)
-https://ppxxzz.com/statistics/md.gif?tracking_data={{...eventName:"enter"...}}
-https://ppxxzz.com/statistics/md.gif?tracking_data={{...eventName:"openRepeatOrder"...}}
-...
-```
-50개면 50개 다. **Gemini가 자체 축약하지 말 것.**
+**중요 규칙 — tracking URL 나열 금지:** tracking URL 목록은 **절대 직접 나열하지 마세요.** 그 대신 이 섹션 끝에 **정확히 아래 한 줄만** 추가하세요(앞뒤로 추가 텍스트·코드블록 금지):
+
+<!-- PHISHAI_TRACKING_URLS_HERE -->
+
+코드가 이 마커를 `victim_flow.tracking_requests` 전체({tracking_count}개) 블록으로 자동 치환합니다. 직접 ```코드블록```을 만들지 마세요(토큰 한도로 잘리면 보고서가 망가집니다).
 
 ### 5-5. 사회공학적 조작 (Social Engineering)
 `victim_flow.scam_patterns`에 있는 각 패턴을 **개별 bullet로** 작성. 각 bullet에는:
@@ -436,13 +433,75 @@ def _build_chain_targets_prompt(evidence_str: str) -> str:
     return _CHAIN_TARGETS_PROMPT.format(evidence_str=evidence_str)
 
 
+_TRACKING_MARKER = "<!-- PHISHAI_TRACKING_URLS_HERE -->"
+
+
 def _build_pass1_prompt(domain: str, date_str: str,
-                        prior_analysis: str, core_str: str) -> str:
+                        prior_analysis: str, core_str: str,
+                        tracking_count: int) -> str:
     prior = (prior_analysis[:6000] if prior_analysis else "(없음)")
     return _PASS1_PROMPT.format(
         domain=domain, date_str=date_str,
         prior_analysis=prior, core_str=core_str,
+        tracking_count=tracking_count,
     )
+
+
+def _render_tracking_block(extracted: dict) -> str:
+    """victim_flow.tracking_requests 전체 URL을 코드블록 문자열로 렌더.
+
+    Pass 1 응답 후처리(_enforce_tracking_block)의 마커 치환값으로 사용.
+    """
+    vf = extracted.get("victim_flow", {}) or {}
+    items = vf.get("tracking_requests", []) or []
+    urls = [t.get("url", "") for t in items if isinstance(t, dict) and t.get("url")]
+    if not urls:
+        return "(tracking_requests 없음)"
+    lines = "\n".join(urls)
+    return f"(tracking_requests 총 {len(urls)}개)\n```\n{lines}\n```"
+
+
+def _count_tracking_urls(extracted: dict) -> int:
+    vf = extracted.get("victim_flow", {}) or {}
+    items = vf.get("tracking_requests", []) or []
+    return len([t for t in items if isinstance(t, dict) and t.get("url")])
+
+
+def _enforce_tracking_block(report_text: str, extracted: dict) -> str:
+    """Pass 1 응답의 tracking URL 마커를 원본 전체 블록으로 치환.
+
+    기본 경로: Gemini가 프롬프트 지시대로 <!-- PHISHAI_TRACKING_URLS_HERE --> 마커만
+    두고 URL 나열을 생략한다. 코드가 그 마커를 48개 URL 블록으로 치환.
+
+    폴백 경로: 마커 미발견 시(Gemini가 지시를 어기고 직접 코드블록을 만든 경우),
+    5-4 헤더 뒤의 첫 코드블록 영역을 블록으로 교체하거나 섹션 끝에 append.
+    """
+    block = _render_tracking_block(extracted)
+    if block.startswith("(tracking_requests 없음"):
+        return report_text
+
+    # 1) 마커 치환 (주 경로)
+    if _TRACKING_MARKER in report_text:
+        return report_text.replace(_TRACKING_MARKER, block, 1)
+
+    # 2) 폴백: 5-4 헤더 뒤 첫 코드블록 교체 (Gemini가 지시 위반한 경우)
+    header_m = re.search(r"#{1,4}\s*5-4[^\n]*\n", report_text)
+    if not header_m:
+        return report_text
+    after_header = header_m.end()
+    code_m = re.search(r"```[\s\S]*?```", report_text[after_header:])
+    if code_m:
+        code_start = after_header + code_m.start()
+        code_end = after_header + code_m.end()
+        return report_text[:code_start] + block + report_text[code_end:]
+
+    # 3) 폴백2: 5-4 섹션 끝(다음 섹션 앞)에 append
+    next_section = re.search(
+        r"\n#{1,4}\s*(?:5-\d|6[\.\s])",
+        report_text[after_header:],
+    )
+    insert_pos = after_header + (next_section.start() if next_section else len(report_text) - after_header)
+    return report_text[:insert_pos].rstrip() + "\n\n" + block + "\n\n" + report_text[insert_pos:].lstrip()
 
 
 def _build_pass2_prompt(domain: str, infra_str: str, vf_str: str,
@@ -1121,14 +1180,18 @@ def generate_final_report(api_key: str, evidence: dict, review: dict,
     infra_data = extracted.pop("infra_probe", {})
 
     core_str = safe_truncate_json(extracted, max_chars=120000)
+    tracking_count = _count_tracking_urls(extracted)
 
-    pass1_prompt = _build_pass1_prompt(domain, date_str, prior_analysis, core_str)
+    pass1_prompt = _build_pass1_prompt(domain, date_str, prior_analysis, core_str, tracking_count)
 
     print("  [Pass 1] 핵심 분석 보고서 생성 중...")
     pass1_result = get_gemini_response(api_key, pass1_prompt, max_output_tokens=32768)
 
     if not pass1_result:
         return ""
+
+    # 5-4 섹션 tracking URL 블록은 Gemini가 축약할 수 있어 원본으로 강제 교체
+    pass1_result = _enforce_tracking_block(pass1_result, extracted)
 
     # --- Pass 2: 인프라/네트워크 심층 + 대응 권고 ---
     infra_str = safe_truncate_json(infra_data, max_chars=30000) if infra_data else "(인프라 데이터 없음)"
