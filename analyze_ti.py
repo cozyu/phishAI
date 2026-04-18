@@ -10,6 +10,8 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from ti_clients.whois_client import whois_lookup
+
 
 def dns_lookup(domain: str) -> dict:
     result = {"A": [], "MX": [], "NS": [], "TXT": [], "CNAME": []}
@@ -29,17 +31,6 @@ def dns_lookup(domain: str) -> dict:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
     return result
-
-
-def whois_lookup(domain: str) -> str:
-    try:
-        out = subprocess.run(
-            ["whois", domain],
-            capture_output=True, text=True, timeout=15
-        )
-        return out.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return ""
 
 
 def _run_ti_client(client_cls, domain: str, env: dict) -> dict:
