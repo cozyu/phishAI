@@ -31,6 +31,418 @@ from ti_clients.gemini_analyzer import (
 )
 import requests
 
+# =============================================================================
+# Prompt 템플릿 — `.format()` 사용. 리터럴 중괄호는 `{{`, `}}` 로 이스케이프.
+# 실제 호출은 이 파일 하단의 `_build_*_prompt()` 헬퍼로 수행.
+# =============================================================================
+
+_REVIEW_GAPS_PROMPT = """당신은 최고 수준의 사이버 보안 분석 전문가(Chief Analyst)입니다.
+아래는 악성사이트 분석을 위해 수집된 모든 증거 자료입니다.
+
+## 수집 데이터
+{evidence_str}
+
+## 당신의 임무
+1. 수집된 모든 데이터를 검토하고, 분석의 완성도를 평가하세요.
+2. 추가로 조사해야 할 항목이 있다면 구체적으로 나열하세요.
+3. 각 추가 조사 항목에 대해 조사 방법(어떤 API, 어떤 도구)도 명시하세요.
+
+## 출력 형식 (JSON)
+{{
+  "completeness_score": 0-100,
+  "current_verdict": "악성/의심/정상",
+  "confidence": 0-100,
+  "gaps": [
+    {{
+      "item": "조사 항목 설명",
+      "reason": "왜 필요한지",
+      "method": "조사 방법 (API/도구명)",
+      "priority": "high/medium/low"
+    }}
+  ],
+  "key_findings_so_far": ["발견1", "발견2", ...],
+  "additional_iocs": ["IOC1", "IOC2", ...]
+}}
+
+반드시 유효한 JSON만 출력하세요. 설명 텍스트 없이 JSON만."""
+
+
+_CHAIN_TARGETS_PROMPT = """당신은 사이버 보안 분석 전문가입니다.
+아래 수집 데이터에서 추가 연쇄 분석이 필요한 도메인과 IP를 추출하세요.
+
+## 수집 데이터
+{evidence_str}
+
+## 연쇄 분석 대상 선정 기준
+- 메인 도메인과 동일 인프라를 공유하는 관련 도메인
+- SSL 인증서 SAN에서 발견된 도메인
+- 네트워크 요청에서 발견된 의심 도메인
+- 이미 분석된 도메인은 제외
+
+## 출력 형식 (JSON 배열만)
+[
+  {{"target": "도메인 또는 IP", "reason": "분석 필요 이유", "type": "domain 또는 ip"}}
+]
+
+유효한 JSON 배열만 출력하세요. 최대 5개."""
+
+
+_PASS1_PROMPT = """당신은 최고 수준의 사이버 보안 분석 전문가(Chief Analyst)입니다.
+아래 **실제 수집 데이터**를 기반으로 악성사이트 분석 보고서를 작성하세요.
+
+## 절대 규칙
+1. 증거 데이터에 존재하는 값만 인용하세요. **데이터를 절대 지어내지 마세요.**
+2. IP, 해시, URL, 도메인은 증거에서 **정확히 복사**하세요. placeholder 금지.
+3. **URL은 절대 축약하지 마세요.** 쿼리 파라미터, 세션ID, 경로를 포함한 전체 URL을 그대로 기술하세요. `.../detail/...?` 같은 축약은 금지.
+4. VirusTotal malicious 수가 0이면 "탐지 엔진 0개"라고 정확히 기술하세요.
+5. 확인되지 않은 항목은 **"미확인"** 또는 **"추가 조사 필요"**로 표시.
+6. 모든 섹션에서 반드시 증거의 구체적 수치/도메인/IP/URL을 인용.
+7. 섹션 번호 체계는 **2-1, 2-2, 3-1, 3-2 ...** 처럼 세부 번호로 작성.
+8. 데이터가 풍부한 경우 축약보다 나열 우선. 독자가 독립적으로 사건을 재현할 수 있을 정도로 상세해야 합니다.
+
+## 분석 대상: {domain}
+## 분석 일시: {date_str}
+
+## 1단계 분석 결과 (참조용 — 오류가 있을 수 있으니 raw 데이터와 대조)
+{prior_analysis}
+
+## 수집 데이터 (raw)
+{core_str}
+
+## 보고서 구조 (이 순서대로, 세부 번호 포함)
+
+# {domain} 악성사이트 분석 보고서
+
+| 항목 | 내용 |
+|---|---|
+| 분석 대상 | {domain} |
+| 분석 일시 | {date_str} |
+| 판정 결과 | **(악성/의심/정상) — 확신도 N%** |
+| 위협 유형 | (구체적, 예: 쇼핑몰 스캠 / 피싱 / 카드 정보 탈취) |
+
+## 1. 개요
+한 단락으로 사이트의 성격과 핵심 위협을 요약.
+
+## 2. TI 조회 결과 요약
+### 2-1. VirusTotal
+- 탐지: malicious=N, suspicious=N, harmless=N
+- 평판 점수
+- WHOIS 요약 (등록일/만료일/등록자 국가/등록 대행/privacy 여부)
+
+### 2-2. URLScan
+- 악성 판정 (True/False)
+- IP (국가/CDN)
+- 리다이렉트/외부 리소스 URL (도메인별 역할 포함)
+- 스크린샷 경로 (있으면)
+
+### 2-3. Criminal IP
+- DGA 점수, JS 난독화 레벨, 응답 상태
+- 관련 도메인/IP
+
+### 2-4. DNS/WHOIS
+- A 레코드 전체 / NS / MX / TXT (없으면 "없음" 명시)
+
+## 3. 직접 접근 분석 — victim_flow 데이터 활용 필수
+### 3-1. 사이트 구조
+언어, 제품 카테고리, 가격대, 눈에 띄는 UI 문구("무료 배송", "7일 교체" 등).
+
+### 3-2. 사이트 하단/푸터 기재 업체 정보
+증거의 `victim_flow.business_info`를 표로 정리 (회사명, 대표자, 전화, 이메일, 사업자번호, 주소).
+헤더/푸터 이메일 불일치, 사업자번호 지역코드 vs 기재 주소 불일치 등 **위조 증거를 교차검증**해 서술.
+
+### 3-3. 네트워크 분석 (외부 리소스 의존성)
+모든 외부 CDN/API 도메인과 그 역할. `victim_flow.external_scripts`와 `external_domains` 전체 나열.
+통계/트래킹 파라미터(siteUserId, shopId 등)가 URL에 있으면 그대로 인용.
+
+## 4. 핵심 악성 근거
+### 4-1. 기업 정보 위조/불일치
+사업자번호 지역불일치, 이메일 도메인 불일치, MX 레코드 없음 등.
+### 4-2. 대량생산 스캠 인프라
+템플릿 CDN(lndpy.com 등), 공유 API 서버(btrbdf.com 등), shopId/siteUserId 같은 대량운영 식별자.
+### 4-3. 도메인 신뢰도 결여
+생성 시점, 의미 없는 이름(DGA), WHOIS privacy, 등록자 국가와 사이트 언어 불일치.
+### 4-4. 개인정보 탈취 수법
+수집 페이지 URL, 수집되는 필드 종류 (개인통관고유부호, 주민번호 등 특수 필드 감지 시 강조).
+
+## 5. 악성 행위 상세 (동적 분석)
+**중요:** 이 섹션은 참조 보고서(고품질)와 동일한 **상세도**로 작성해야 합니다. 각 서브섹션에 bullet/표 + 설명이 반드시 들어가야 하고, URL은 전체 그대로.
+
+### 5-1. 개인정보 탈취 (Credential Harvesting)
+결제 페이지(`/checkout/...`)에서 다음 개인정보를 입력받는 폼 확인 — **2열 표 (입력 필드 | 설명)** 형식.
+`victim_flow.input_fields` 전부 나열. 설명 컬럼에는 반드시 다음 중 해당 내용 포함:
+- 포맷(예: "010-1234-5678 형식, 한국 번호"), 수집 명목(예: "배송 정보 수신"), 연동 API(예: "다음 우편번호 API(t1.daumcdn.net/mapjsapi) 연동"), 수집 방식(예: "Airwallex iframe으로 수집")
+표 아래에 강조 문장: "피해자의 실명, 전화번호, 주소, 이메일, 신용카드 전체 정보가 한 번에 수집됨."
+
+### 5-2. 결제 게이트웨이 악용 (Airwallex 등)
+**4개 bullet 형식**으로 작성:
+- **결제 처리**: `checkout.airwallex.com` iframe을 통한 카드 결제.
+- **PG사 소개**: Airwallex는 홍콩 기반 글로벌 핀테크 기업의 정식 결제 게이트웨이.
+- **위험성**: 정상 PG를 악용하므로 결제 자체는 실제로 처리될 수 있음 → **실제 금전 피해 발생**.
+- **로깅 엔드포인트**: (확인되면) `o11y.airwallex.com/airtracker/logs` 등 관련 URL 나열.
+이어서 **카드 정보 수집 iframe URL 3개**(card-number, expiry, cvc)를 코드블록 또는 bullet로 **전체 URL 그대로**.
+
+### 5-3. Device Fingerprinting (기기 추적)
+**3개 bullet + 강조 문장** 형식:
+- `static.airwallex.com/.../sardine-iframe.html?...` — Sardine 사기방지 SDK (전체 URL)
+- `static.airwallex.com/.../risk-iframe.html?...` — 위험 평가 SDK (전체 URL)
+- `deviceInfo.*.js` 같은 기기 정보 수집 스크립트 (있으면 전체 URL)
+**강조**: "피해자의 기기 정보까지 수집하여 향후 추가 사기에 활용 가능".
+
+### 5-4. 사용자 행동 추적 (Behavioral Tracking)
+**4개 bullet 형식**:
+- `/statistics/md.gif?tracking_data=...` — 페이지 진입/이탈/클릭/구매 이벤트를 1px GIF로 추적. (아래 코드블록에 `victim_flow.tracking_requests`의 **모든 URL 전체 나열**)
+- `arms-retcode.aliyuncs.com` 등 외부 행동분석 플랫폼 — 역할 설명.
+- **추적 이벤트**: URL의 eventName 파라미터에서 관찰된 **모든 이벤트명 나열** (예: `enter`, `leave`, `DOMContentLoaded`, `buyNow`, `addToCart`, `openRepeatOrder`). 가능한 한 많이 추출.
+- **강조**: "공격자가 피해자의 구매 여정을 실시간으로 모니터링".
+
+tracking URL 코드블록 예시:
+```
+(중복 제거 없이 전부 나열)
+https://ppxxzz.com/statistics/md.gif?tracking_data={{...eventName:"enter"...}}
+https://ppxxzz.com/statistics/md.gif?tracking_data={{...eventName:"openRepeatOrder"...}}
+...
+```
+50개면 50개 다. **Gemini가 자체 축약하지 말 것.**
+
+### 5-5. 사회공학적 조작 (Social Engineering)
+`victim_flow.scam_patterns`에 있는 각 패턴을 **개별 bullet로** 작성. 각 bullet에는:
+- 실제 사이트 문구 (인용)
+- 해당 문구가 유도하는 심리적 효과 (긴급성/희소성/신뢰도 위조/경계심 해제 등)
+
+참조 보고서 스타일:
+- "단 20개 남았습니다" + "4명이 구매 중입니다" — 가짜 긴급성/희소성 유도
+- 가짜 구매자 이름 슬라이더 ("이*", "박*" 등 20명) — 위조된 사회적 증거
+- "500개 판매 완료" — 신뢰도 위조
+- "카드 결제(❤현대카드 추천❤)" — 특정 카드사 추천으로 신뢰 유도
+- 카운트다운 타이머 ("남은 05:59:53") — 즉각적 결제 유도
+- 중국어 CAPTCHA ("安全验证", "拖动下方滑块完成拼图") — 정상 보안 절차 위장
+
+scam_patterns가 6개 있으면 6개 전부. 축약 금지.
+
+### 5-6. 악성 파일 다운로드 / C2 통신
+**반드시 작성 (누락 금지)**. 3개 bullet:
+- 분석 시점에 악성 파일 자동 다운로드 — **확인 여부** (미확인이면 "미확인"으로 명시)
+- C2 서버 직접 명령제어 통신 — **확인 여부** (미확인이면 "미확인")
+- 대체 통신 경로: evidence의 API 서버(api.btrbdf.com 등)로의 지속적 API 통신이 피해자 데이터 수집/전달 역할 수행.
+
+## 5-7. URL 기반 공격 시나리오 (피해자 흐름 재현)
+**코드 블록(\\`\\`\\`)** 하나로 모든 STEP을 담아 작성. visited_pages 수에 맞춰 **최소 6 STEP 이상**으로 상세화. 결제 페이지는 반드시 서브스텝([4-A]~[4-E])으로 분해.
+
+각 STEP에 반드시 포함:
+- **URL** (전체, 축약 금지 — 쿼리 파라미터·세션ID·경로 모두 유지)
+- **행위** (사용자 관점에서 무엇을 하는지)
+- **조작 문구** (scam_patterns 및 페이지 본문에서 관찰된 가짜 긴급성·카운트다운·가짜 구매자 등)
+- **로드되는 외부 리소스** (external_scripts/domains에서 인용, 도메인별 역할)
+- **추적/API 호출** (tracking_requests에서 인용, eventName·수집 필드 명시)
+- **전송 대상 서버**
+
+결제 페이지 서브스텝 형식 예:
+```
+[STEP 4] 결제 페이지 (개인정보 + 카드 정보 수집)
+  URL: https://ppxxzz.com/checkout/<전체 경로+쿼리>
+  추적: /statistics/md.gif → eventName: "addToCart" (장바구니 추가, 상품/가격 정보 포함)
+
+  [4-A] 개인정보 입력 폼:
+     - firstname (실명)
+     - phone1 (전화번호)
+     - zipCode / building (우편번호 + 상세주소)
+     - email
+     → 전송: ppxxzz.com → api.btrbdf.com
+
+  [4-B] 결제수단 선택:
+     - 사용 가능 결제수단 나열
+     - 기본 선택된 옵션
+
+  [4-C] 카드 정보 입력 (iframe):
+     - iframe 1: checkout.airwallex.com/#/elements/card-number?... (전체 URL)
+     - iframe 2: checkout.airwallex.com/#/elements/expiry?...
+     - iframe 3: checkout.airwallex.com/#/elements/cvc?...
+     - iframe 4: checkout.airwallex.com/#/frame/popup?...
+
+  [4-D] Device Fingerprinting:
+     - iframe 5: static.airwallex.com/.../sardine-iframe.html?sessionKey=... (전체)
+     - iframe 6: static.airwallex.com/.../risk-iframe.html?... (전체)
+     - script: imgstorage2.lndpy.com/.../deviceInfo.*.js
+
+  [4-E] CAPTCHA 위장 (있는 경우):
+     - scam_patterns에 '중국어 CAPTCHA' 있으면 안심 경계심 해제 기법 서술
+```
+Airwallex iframe이나 sardine/risk iframe은 URL의 쿼리 파라미터까지 그대로 복사.
+
+## 5-8. 데이터 전송 경로 요약
+**ASCII 박스 다이어그램**으로 데이터 유형별(개인정보/카드정보/기기정보/행동데이터/추적데이터) 전송 경로를 표현.
+예:
+```
+피해자 브라우저
+  ├─[개인정보]──→ ppxxzz.com (CloudFront) ──→ GIIKIN ALB (싱가포르)
+  ├─[카드정보]──→ checkout.airwallex.com (Airwallex PG, 홍콩)
+  ├─[기기정보]──→ static.airwallex.com (Sardine/Risk iframe)
+  └─[추적데이터]─→ /statistics/md.gif → api.btrbdf.com
+```
+(이 섹션은 반드시 ASCII 형식. mermaid는 6-5 스캠 네트워크 구조도에서만 사용.)
+
+한국어로 작성해 주세요."""
+
+
+_PASS2_PROMPT = """당신은 사이버 보안 분석 전문가입니다.
+아래 인프라 분석 데이터를 기반으로 보고서의 후반부(6~10장)를 작성하세요.
+
+## 절대 규칙
+1. 아래 데이터에 존재하는 값만 인용. 지어내지 마세요.
+2. IP·도메인·URL은 증거에서 **정확히 복사**, 축약 금지.
+3. 섹션 번호는 Pass 1의 연장선(6, 7, 8 ...)으로 사용.
+4. 축약보다 나열 우선. SSL SAN에 50개 도메인이 있으면 50개 모두 나열.
+5. **기타 IOC 섹션**은 반드시 아래 `victim_flow.business_info` + WHOIS 데이터의 **실제 값**으로 채우세요. "미표기"라고 쓰지 말고 데이터에 있는 값을 그대로 복사하세요.
+
+## 분석 대상: {domain}
+
+## 인프라 프로빙 데이터
+{infra_str}
+
+## Victim Flow 증거 (7-3 기타 IOC 및 6-5 구조도에 활용)
+{vf_str}
+
+## WHOIS 원본 (registrar 추출용)
+{whois_str}
+
+## 갭 분석 결과
+{review_str}
+
+## 연쇄 분석 결과
+{chain_str}
+
+## 작성할 섹션 (Pass 1에 이어서)
+
+## 6. 추가 분석 (인프라 · SSL · DGA)
+### 6-1. 원본 서버 인프라 (CDN 우회 추적)
+ALB CNAME, 원본 IP (리전 포함), 웹서버 소프트웨어, 식별된 플랫폼명.
+표 형식으로 정리:
+| 항목 | 값 |
+|---|---|
+| ALB CNAME | ... |
+| 원본 IP | ... |
+| 웹서버 | ... |
+| 플랫폼명 | ... |
+
+### 6-2. SSL 인증서 SAN 분석 — 스캠 네트워크 전체 도메인 식별
+증거의 infra_probe.ssl_san 또는 관련 데이터에서 **모든 SAN 도메인을 전부 나열**하세요.
+각 인증서(CN 기준)마다 별도 코드블록으로 나열:
+```
+<CN>의 인증서 SAN (총 N개):
+도메인1, 도메인2, 도메인3, ...
+```
+DGA 점수가 계산된 도메인이 있으면 점수도 함께 표기.
+
+### 6-3. 추가 의심 인프라 도메인
+| 도메인 | 역할 | 비고 |
+|---|---|---|
+표 형식으로 정리 (리소스 CDN, 가짜 고객센터 등).
+
+### 6-4. JS 난독화 / 보안 헤더
+난독화 건수, Content-Security-Policy 등 보안 헤더 존재 여부.
+
+### 6-5. 스캠 네트워크 구조도
+**반드시 mermaid `graph TD` 다이어그램으로 작성.** (PDF는 mermaid를 그림으로 렌더합니다.)
+사용자(피해자) → CDN → 메인 도메인 → (원본 서버 / 리소스 서버 / API 추적 서버 / 결제 GW / DGA 네트워크) 구조를 표현.
+
+형식 예:
+```mermaid
+graph TD
+    User["피해자"] --> CDN["AWS CloudFront<br/>18.67.51.x"]
+    CDN --> Main["ppxxzz.com"]
+    Main --> API["api.btrbdf.com<br/>AWS ALB Singapore"]
+    Main --> Resource["imgstorage2.lndpy.com<br/>리소스 CDN"]
+    Main --> Payment["checkout.airwallex.com<br/>결제 GW"]
+    Payment --> FP["static.airwallex.com<br/>Sardine/Risk 핑거프린팅"]
+    API --> DGA["DGA 네트워크<br/>btrbdf.com, csdrbt.com<br/>dsbrtd.com ..."]
+    Main --> Tracking["/statistics/md.gif<br/>행동 추적"]
+```
+각 노드 레이블은 실제 증거의 도메인·IP·역할 포함. **8~12개 노드 권장.**
+
+## 7. IOC (Indicators of Compromise)
+
+### 7-1. 도메인
+| 도메인 | 역할 |
+|---|---|
+evidence와 victim_flow에 있는 **모든** 도메인 나열 (메인 도메인, API 서버, 리소스 CDN, 결제 GW, 가짜 고객센터, DGA SAN 도메인 전부 포함).
+
+### 7-2. IP 주소
+| IP | 용도 |
+|---|---|
+evidence에 있는 **모든** IP 나열. 용도 컬럼에 "ppxxzz.com (AWS CloudFront)", "api.btrbdf.com (AWS ALB Singapore)", "외부 리소스 IP" 등 구체화.
+
+### 7-3. 기타 IOC
+**반드시 다음 6개 bullet을 실제 값으로 채우세요** (추상 설명 금지, 아래 데이터 값 그대로 인용):
+- **등록 대행**: `whois_structured.registrar` 값 (예: `http://www.xinnet.com` 또는 `xinnet.com`). 파일 whois가 비어있어도 VT whois에서 가져온 값 사용. 데이터에 있으면 반드시 실제 값 기재.
+- **등록자 국가/이메일**: `whois_structured.registrant_country`, `whois_structured.registrant_email` (예: `China`, `bcb35a666a802f50s@`)
+- **도메인 생성/만료일**: `whois_structured.creation_date`, `whois_structured.expiry_date` (예: `2025-05-27` / `2026-05-27`)
+- **전화번호**: `victim_flow.business_info.phones`의 모든 값 (예: `+86 13303999778`, `010-1234-5678`)
+- **이메일**: `victim_flow.business_info.emails`의 모든 값 + WHOIS 등록자 이메일 (예: `service@ppxxzz.com`, `service@mail.mido-sale.com`)
+- **사업자번호/통합사회신용코드**: `victim_flow.business_info.business_codes` (있으면 값 그대로, 없으면 `footer_texts`에서 추출 — 예: `91433127MAEY1FTT16`)
+- **특정 URL**: 결제 iframe/tracking pixel의 대표 URL
+
+## 8. 연쇄 분석 추천
+| 추가 조사 대상 | 이유 |
+|---|---|
+- 연관 도메인/IP마다 왜 추가 조사해야 하는지 구체 명시.
+- 푸터 이메일의 다른 도메인, 템플릿 CDN 인프라 등.
+
+## 9. 대응 권고 (피해 방지)
+다음 **5개 카테고리**를 반드시 모두 채우세요. 각각 구체적 대상 명시.
+
+### 9-1. 네트워크 차단
+방화벽/DNS 필터링에서 차단해야 할 도메인·IP 목록을 **bullet로 전체 나열**.
+(C2/tracking/payment/resource 모두 포함).
+
+### 9-2. 사용자 주의보
+사용자에게 전달할 경고 내용 — 어떤 사이트에서 무엇을 입력 금지해야 하는지.
+개인통관고유부호/주민번호 등 특수 필드가 있으면 강조.
+
+### 9-3. 기관 신고
+- KISA 보호나라 (https://www.boho.or.kr/)
+- 경찰청 사이버수사국 (https://ecrm.police.go.kr/)
+- 호스팅 사업자 abuse 신고 (AWS abuse@amazon.com, Alibaba Cloud 등 해당 시)
+- 결제 게이트웨이 abuse 신고 (Airwallex 등 악용된 경우)
+
+### 9-4. 피해 확인 및 조치
+결제가 이미 발생했을 때: 카드사 승인 취소, 카드 재발급, 개인정보 노출 시 계좌 모니터링.
+
+### 9-5. 지속적 모니터링
+관련 인프라(templates CDN, API 서버)에서 생성되는 신규 스캠 도메인 추적 방안.
+
+## 10. 분석가 주석
+VT 탐지율 0 등 오탐으로 보일 수 있는 결과에 대한 해설.
+왜 TI 탐지가 없음에도 악성으로 판정했는지 **결정적 근거** 3~5개로 요약.
+
+한국어로 작성해 주세요. 텍스트가 길어져도 괜찮으니 세부 정보를 모두 포함하세요."""
+
+
+def _build_review_gaps_prompt(evidence_str: str) -> str:
+    return _REVIEW_GAPS_PROMPT.format(evidence_str=evidence_str)
+
+
+def _build_chain_targets_prompt(evidence_str: str) -> str:
+    return _CHAIN_TARGETS_PROMPT.format(evidence_str=evidence_str)
+
+
+def _build_pass1_prompt(domain: str, date_str: str,
+                        prior_analysis: str, core_str: str) -> str:
+    prior = (prior_analysis[:6000] if prior_analysis else "(없음)")
+    return _PASS1_PROMPT.format(
+        domain=domain, date_str=date_str,
+        prior_analysis=prior, core_str=core_str,
+    )
+
+
+def _build_pass2_prompt(domain: str, infra_str: str, vf_str: str,
+                        whois_str: str, review_str: str,
+                        chain_str: str) -> str:
+    chain = chain_str if chain_str else "(미수행)"
+    return _PASS2_PROMPT.format(
+        domain=domain, infra_str=infra_str, vf_str=vf_str,
+        whois_str=whois_str, review_str=review_str, chain_str=chain,
+    )
+
 
 def get_gemini_response(api_key: str, prompt: str, tier: str = "standard",
                         max_output_tokens: int = 8192) -> str:
@@ -161,37 +573,7 @@ def collect_evidence(domain: str, date_str: str) -> dict:
 def review_and_identify_gaps(api_key: str, evidence: dict) -> dict:
     """수집된 데이터를 검토하고 추가 조사 필요 항목 식별"""
     evidence_str = safe_truncate_json(evidence)
-
-    prompt = f"""당신은 최고 수준의 사이버 보안 분석 전문가(Chief Analyst)입니다.
-아래는 악성사이트 분석을 위해 수집된 모든 증거 자료입니다.
-
-## 수집 데이터
-{evidence_str}
-
-## 당신의 임무
-1. 수집된 모든 데이터를 검토하고, 분석의 완성도를 평가하세요.
-2. 추가로 조사해야 할 항목이 있다면 구체적으로 나열하세요.
-3. 각 추가 조사 항목에 대해 조사 방법(어떤 API, 어떤 도구)도 명시하세요.
-
-## 출력 형식 (JSON)
-{{
-  "completeness_score": 0-100,
-  "current_verdict": "악성/의심/정상",
-  "confidence": 0-100,
-  "gaps": [
-    {{
-      "item": "조사 항목 설명",
-      "reason": "왜 필요한지",
-      "method": "조사 방법 (API/도구명)",
-      "priority": "high/medium/low"
-    }}
-  ],
-  "key_findings_so_far": ["발견1", "발견2", ...],
-  "additional_iocs": ["IOC1", "IOC2", ...]
-}}
-
-반드시 유효한 JSON만 출력하세요. 설명 텍스트 없이 JSON만."""
-
+    prompt = _build_review_gaps_prompt(evidence_str)
     response = get_gemini_response(api_key, prompt, tier="lite")
     # JSON 추출
     try:
@@ -280,26 +662,7 @@ def execute_additional_investigation(api_key: str, gap: dict, domain: str, date_
 def identify_chain_targets(api_key: str, evidence: dict) -> list:
     """수집 데이터에서 연쇄 분석이 필요한 도메인/IP 목록 추출"""
     evidence_str = safe_truncate_json(evidence, 12000)
-
-    prompt = f"""당신은 사이버 보안 분석 전문가입니다.
-아래 수집 데이터에서 추가 연쇄 분석이 필요한 도메인과 IP를 추출하세요.
-
-## 수집 데이터
-{evidence_str}
-
-## 연쇄 분석 대상 선정 기준
-- 메인 도메인과 동일 인프라를 공유하는 관련 도메인
-- SSL 인증서 SAN에서 발견된 도메인
-- 네트워크 요청에서 발견된 의심 도메인
-- 이미 분석된 도메인은 제외
-
-## 출력 형식 (JSON 배열만)
-[
-  {{"target": "도메인 또는 IP", "reason": "분석 필요 이유", "type": "domain 또는 ip"}}
-]
-
-유효한 JSON 배열만 출력하세요. 최대 5개."""
-
+    prompt = _build_chain_targets_prompt(evidence_str)
     response = get_gemini_response(api_key, prompt, tier="lite")
     try:
         json_match = re.search(r'\[[\s\S]*\]', response)
@@ -493,6 +856,37 @@ def _filter_san_domains(infra_probe: dict, known_domains: set) -> list:
     return sorted(result, key=lambda x: -x["dga_score"])
 
 
+def _parse_whois_fields(whois_text: str) -> dict:
+    """WHOIS 원문에서 주요 필드를 구조화 (Gemini가 놓쳐도 보고서에 반영되도록)"""
+    if not whois_text:
+        return {}
+    fields = {}
+    # 'Key: Value' 패턴 추출 (VT whois 및 표준 whois 모두 매칭)
+    patterns = {
+        "registrar": r"(?:Registrar|Domain registrar(?:\s+url)?)\s*:\s*(.+)",
+        "registrar_id": r"Domain registrar id\s*:\s*(.+)",
+        "creation_date": r"(?:Create date|Creation Date|Registered on)\s*:\s*(.+)",
+        "expiry_date": r"(?:Expiry date|Expiration Date|Registry Expiry Date)\s*:\s*(.+)",
+        "registrant_country": r"Registrant[\s_]?country\s*:\s*(.+)",
+        "registrant_email": r"Registrant[\s_]?email\s*:\s*(.+)",
+        "registrant_city": r"Registrant[\s_]?city\s*:\s*(.+)",
+        "registrant_org": r"Registrant[\s_]?(?:organization|company|org)\s*:\s*(.+)",
+        "admin_country": r"Admin(?:istrative)?[\s_]?country\s*:\s*(.+)",
+        "name_servers": r"(?:Name server|Nameserver|Name Server)\s*:\s*(.+)",
+    }
+    for key, pat in patterns.items():
+        matches = re.findall(pat, whois_text, re.IGNORECASE)
+        if matches:
+            # 중복 제거 (동일 필드가 여러 번 나오는 경우, 예: Name server)
+            vals = []
+            for m in matches:
+                v = m.strip()
+                if v and v not in vals:
+                    vals.append(v)
+            fields[key] = vals[0] if len(vals) == 1 else vals
+    return fields
+
+
 def extract_evidence_summary(evidence: dict) -> dict:
     """evidence에서 보고서 생성에 핵심적인 데이터만 추출.
 
@@ -585,10 +979,24 @@ def extract_evidence_summary(evidence: dict) -> dict:
     if dns:
         summary["dns"] = dns
 
-    # WHOIS
-    whois = sources.get("whois", "")
-    if whois:
-        summary["whois"] = whois[:1500]
+    # WHOIS — 우선순위: dns_whois/whois.txt > virustotal.whois
+    whois_text = sources.get("whois", "")
+    vt = sources.get("virustotal", {}) or {}
+    vt_whois = vt.get("whois", "") if isinstance(vt, dict) else ""
+    if not whois_text and vt_whois:
+        whois_text = vt_whois
+    if whois_text:
+        summary["whois"] = whois_text[:3000]
+        # 주요 필드를 구조화하여 추가 (Gemini가 추출에 실패해도 놓치지 않도록)
+        whois_struct = _parse_whois_fields(whois_text)
+        if vt:
+            # VT의 구조화된 필드 병합
+            if vt.get("registrar"):
+                whois_struct.setdefault("registrar", vt.get("registrar"))
+            if vt.get("creation_date"):
+                whois_struct.setdefault("creation_date_ts", vt.get("creation_date"))
+        if whois_struct:
+            summary["whois_structured"] = whois_struct
 
     # Gemini 1단계 분석 (이미 수행된 종합 분석 — 보고서 기반으로 활용)
     ga = sources.get("gemini_analysis", {})
@@ -608,30 +1016,47 @@ def extract_evidence_summary(evidence: dict) -> dict:
     if net_domains:
         summary["network_domains"] = net_domains
 
-    # 동적 분석 결과
+    # 동적 분석 결과 — 중요 필드 전체 전달, 대용량(all_network_requests)은 요약
     dynamic = sources.get("dynamic_result", {})
     if dynamic and "error" not in dynamic:
         summary["dynamic_analysis"] = {
             "site_type": dynamic.get("site_type"),
             "severity": dynamic.get("severity"),
-            "findings": dynamic.get("findings", "")[:800],
+            "findings": dynamic.get("findings", ""),
             "rounds_completed": dynamic.get("rounds_completed"),
         }
-        # AI 에이전트가 탐색 중 수집한 victim_flow (checkout/결제/입력 페이지 증거)
-        vf = dynamic.get("victim_flow", {})
+        vf = dynamic.get("victim_flow", {}) or {}
         if vf:
-            summary["victim_flow"] = {
-                "visited_pages": vf.get("visited_pages", [])[:10],
-                "iframes": vf.get("iframes", [])[:15],
-                "input_fields": vf.get("input_fields", [])[:30],
-                "forms": vf.get("forms", [])[:10],
-                "external_domains": vf.get("external_domains", [])[:40],
+            # all_network_requests는 수백개가 되므로 메서드·도메인별 카운트 요약으로 대체
+            all_net = vf.get("all_network_requests", []) or []
+            net_domain_counts: dict = {}
+            for req in all_net:
+                m = re.search(r"https?://([a-zA-Z0-9.-]+)", req.get("url", ""))
+                if m:
+                    net_domain_counts[m.group(1)] = net_domain_counts.get(m.group(1), 0) + 1
+            compact_vf = {
+                "visited_pages": vf.get("visited_pages", []),
+                "iframes": vf.get("iframes", []),
+                "input_fields": vf.get("input_fields", []),
+                "forms": vf.get("forms", []),
+                "external_domains": vf.get("external_domains", []),
+                "external_scripts": vf.get("external_scripts", []),
+                "tracking_requests": vf.get("tracking_requests", []),  # 전체 URL 그대로
+                "scam_patterns": vf.get("scam_patterns", []),
+                "business_info": vf.get("business_info", {}),
+                "network_traffic_summary": {
+                    "total_requests": len(all_net),
+                    "domain_counts": dict(sorted(
+                        net_domain_counts.items(), key=lambda x: -x[1]
+                    )[:50]),
+                },
             }
+            summary["victim_flow"] = compact_vf
         history = dynamic.get("history", [])
         if history:
             summary["dynamic_analysis"]["action_history"] = [
-                f"Step {h.get('step')}: {h.get('action')}({json.dumps(h.get('args', {}), ensure_ascii=False)[:60]}) -> {h.get('result')}"
-                for h in history[:15]
+                f"Step {h.get('step')}: {h.get('action')}({json.dumps(h.get('args', {}), ensure_ascii=False)}) -> {h.get('result')}"
+                for h in history
             ]
 
     return summary
@@ -676,141 +1101,60 @@ def generate_final_report(api_key: str, evidence: dict, review: dict,
     # infra_probe 상세는 Pass 2에서 사용
     infra_data = extracted.pop("infra_probe", {})
 
-    core_str = safe_truncate_json(extracted, max_chars=12000)
+    core_str = safe_truncate_json(extracted, max_chars=120000)
 
-    pass1_prompt = f"""당신은 최고 수준의 사이버 보안 분석 전문가(Chief Analyst)입니다.
-아래 **실제 수집 데이터**를 기반으로 악성사이트 분석 보고서를 작성하세요.
-
-## 절대 규칙
-1. 아래 증거 데이터에 존재하는 값만 인용하세요. **데이터를 절대 지어내지 마세요.**
-2. IP, 해시, URL, 도메인은 증거에서 **정확히 복사**하세요. placeholder(x.x.x, abc123...)는 금지.
-3. VirusTotal malicious 수가 0이면 "탐지 엔진 0개"라고 정확히 기술하세요.
-4. 확인되지 않은 항목은 **"미확인"** 또는 **"추가 조사 필요"**로 표시하세요.
-5. 사이트 유형은 DOM 분석의 platform/구조 정보를 기준으로 판단하세요.
-6. 모든 섹션에서 반드시 증거의 구체적 수치/도메인/IP를 인용하세요.
-
-## 분석 대상: {domain}
-## 분석 일시: {date_str}
-
-## 1단계 분석 결과 (참조용 — 오류가 있을 수 있으니 raw 데이터와 대조하세요)
-{prior_analysis[:2500] if prior_analysis else "(없음)"}
-
-## 수집 데이터 (raw)
-{core_str}
-
-## 보고서 구조 (이 순서대로 작성)
-
-# {domain} 악성사이트 분석 보고서
-
-| 항목 | 내용 |
-|---|---|
-| 분석 대상 | {domain} |
-| 분석 일시 | {date_str} |
-| 판정 결과 | (악성/의심/정상 — 확신도 N%) |
-| 위협 유형 | (구체적) |
-
-## 1. 개요
-한 단락으로 사이트의 성격과 핵심 위협을 요약.
-
-## 2. TI 조회 결과 요약
-각 TI 소스별(VirusTotal, URLScan, CriminalIP, DNS/WHOIS) **실제 수치**를 기재.
-데이터가 없는 소스는 "데이터 없음"으로 표시.
-
-## 3. 직접 접근 분석
-사이트 구조, 방문 페이지 제목, 기재된 업체 정보, 네트워크 요청에서 관찰된 외부 도메인.
-DOM 분석의 platform 정보, input_fields, suspicious_patterns 인용.
-**반드시 `victim_flow` 데이터를 활용하세요:**
-- `visited_pages`: AI 에이전트가 실제로 탐색한 페이지 경로 (메인 → 상품 → checkout 등)
-- `iframes`: 결제/로그인 iframe의 src (예: Airwallex, Stripe 같은 결제 GW 식별)
-- `input_fields`: checkout/로그인 페이지에서 수집되는 입력 필드 (type/name/placeholder)
-- `forms`: form action URL → 실제 데이터가 전송되는 서버 파악
-- `dynamic_analysis.action_history`: AI 에이전트가 수행한 행동 단계별 기록 (어떤 버튼을 눌러 어디에 도달했는지)
-이 데이터를 근거로 "AI 에이전트가 X 페이지까지 자동 탐색했고, 결제 iframe Y 또는 입력 필드 Z가 확인됨"처럼 구체적으로 서술하세요.
-
-## 4. 핵심 악성 근거
-증거 데이터에 기반한 구체적 악성 근거를 번호 매겨 나열. 각 근거에 증거 인용 필수.
-
-## 5. 악성 행위 상세
-실제 사이트 유형에 해당하는 항목만 작성 (해당 없는 항목은 생략):
-- 개인정보 탈취 (어떤 데이터가, 어떤 경로로)
-- 결제/금융 사기 (결제 흐름, 카드 정보 처리)
-- 로그인 정보 탈취 (사칭 대상, 크리덴셜 전송 경로)
-- 사용자 추적/기기 핑거프린팅
-- 사회공학적 조작 기법
-- 악성파일 다운로드 / C2 통신
-
-## 6. 공격 시나리오
-[STEP 1]~[STEP N] 형식. 각 단계마다: URL, 행위, 로드되는 외부 리소스, 수집되는 데이터, 전송 대상 서버를 **구체적으로** 명시.
-
-## 7. 데이터 전송 경로 요약
-텍스트 다이어그램으로 데이터 유형별(개인정보, 카드정보, 추적데이터 등) 전송 경로 표현.
-
-## 8. IOC 목록
-도메인 표(도메인 | 역할), IP 표(IP | 용도), 기타 IOC(이메일, 전화번호 등).
-**증거 데이터에서 추출한 실제 값만 사용.**
-
-한국어로 작성해 주세요."""
+    pass1_prompt = _build_pass1_prompt(domain, date_str, prior_analysis, core_str)
 
     print("  [Pass 1] 핵심 분석 보고서 생성 중...")
-    pass1_result = get_gemini_response(api_key, pass1_prompt, max_output_tokens=16384)
+    pass1_result = get_gemini_response(api_key, pass1_prompt, max_output_tokens=32768)
 
     if not pass1_result:
         return ""
 
     # --- Pass 2: 인프라/네트워크 심층 + 대응 권고 ---
-    infra_str = safe_truncate_json(infra_data, max_chars=6000) if infra_data else "(인프라 데이터 없음)"
+    infra_str = safe_truncate_json(infra_data, max_chars=30000) if infra_data else "(인프라 데이터 없음)"
 
-    # review 결과에서 핵심 정보 추출
+    # Pass 2가 IOC 섹션을 작성할 때 참조할 victim_flow.business_info + 주요 victim_flow 요약
+    vf_for_pass2 = extracted.get("victim_flow", {}) or {}
+    business_info = vf_for_pass2.get("business_info", {})
+    victim_flow_summary = {
+        "business_info": business_info,
+        "visited_pages": vf_for_pass2.get("visited_pages", []),
+        "external_domains": vf_for_pass2.get("external_domains", []),
+        "iframes": vf_for_pass2.get("iframes", []),
+        "forms": vf_for_pass2.get("forms", []),
+        "scam_patterns": vf_for_pass2.get("scam_patterns", []),
+    }
+    vf_str = safe_truncate_json(victim_flow_summary, max_chars=20000)
+
+    # WHOIS 등록 대행 정보 — 파일 whois 없으면 VT whois 사용, 구조화된 필드도 포함
+    whois_raw = extracted.get("whois", "")
+    whois_struct = extracted.get("whois_structured", {})
+    if whois_raw or whois_struct:
+        whois_str = safe_truncate_json(
+            {"whois_raw": whois_raw, "whois_structured": whois_struct},
+            max_chars=5000,
+        )
+    else:
+        whois_str = "(미수집)"
+
     review_summary = {
         "current_verdict": review.get("current_verdict"),
         "confidence": review.get("confidence"),
-        "key_findings": review.get("key_findings_so_far", [])[:5],
-        "additional_iocs": review.get("additional_iocs", [])[:10],
+        "key_findings": review.get("key_findings_so_far", []),
+        "additional_iocs": review.get("additional_iocs", []),
     }
-    review_str = safe_truncate_json(review_summary, max_chars=2000)
+    review_str = safe_truncate_json(review_summary, max_chars=6000)
 
     chain_str = ""
     if chain_results:
-        chain_str = safe_truncate_json(chain_results, max_chars=2000)
+        chain_str = safe_truncate_json(chain_results, max_chars=6000)
 
-    pass2_prompt = f"""당신은 사이버 보안 분석 전문가입니다.
-아래 인프라 분석 데이터를 기반으로 보고서의 후반부를 작성하세요.
-
-## 절대 규칙
-1. 아래 데이터에 존재하는 값만 인용하세요. 데이터를 지어내지 마세요.
-2. IP, 도메인은 증거에서 정확히 복사하세요.
-
-## 분석 대상: {domain}
-
-## 인프라 프로빙 데이터
-{infra_str}
-
-## 갭 분석 결과
-{review_str}
-
-## 연쇄 분석 결과
-{chain_str if chain_str else "(미수행)"}
-
-## 작성할 섹션
-
-## 9. 인프라 분석
-원본 서버(origin candidates) 정보, ALB/CNAME 구조, CDN 우회 결과.
-SSL 인증서 SAN에서 발견된 관련 도메인 목록 (DGA 의심 여부 포함).
-
-## 10. 스캠 네트워크 구조도
-mermaid graph TD 형식으로 인프라 관계도 작성.
-사용자 → CDN → 원본서버, 리소스서버, 추적서버 등 실제 데이터 기반.
-
-## 11. 대응 권고
-네트워크 차단, 사용자 주의보, 기관 신고, 모니터링 등 구체적 권고.
-
-## 12. 분석 한계 및 추가 조사 권고
-현재 분석에서 확인되지 않은 사항과 추가 조사가 필요한 영역.
-
-한국어로 작성해 주세요."""
+    # Pass 1에서 수집된 IOC 참조
+    pass2_prompt = _build_pass2_prompt(domain, infra_str, vf_str, whois_str, review_str, chain_str)
 
     print("  [Pass 2] 인프라/대응 권고 생성 중...")
-    pass2_result = get_gemini_response(api_key, pass2_prompt, max_output_tokens=8192)
+    pass2_result = get_gemini_response(api_key, pass2_prompt, max_output_tokens=32768)
 
     # --- 최종 조합 ---
     report_parts = [pass1_result]
