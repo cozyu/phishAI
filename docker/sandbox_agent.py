@@ -152,29 +152,70 @@ def extract_snapshot(page, net_log: list, name: str) -> dict:
                 });
 
             const iframes = [...document.querySelectorAll('iframe')]
-                .filter(f => f.src).slice(0, 10)
+                .filter(f => f.src)
+                .slice(0, HARD_CAP)
                 .map(f => ({src: f.src, id: f.id, name: f.name}));
 
-            const forms = [...document.querySelectorAll('form')].slice(0, 5)
+            const forms = [...document.querySelectorAll('form')]
+                .slice(0, HARD_CAP)
                 .map(f => ({
                     action: f.action, method: f.method, id: f.id,
                     inputs: [...f.querySelectorAll('input,select,textarea')]
-                        .map(i => i.name || i.type).slice(0, 10)
+                        .map(i => ({name: i.name, type: i.type, placeholder: i.placeholder}))
                 }));
 
             const scripts = [...document.querySelectorAll('script[src]')]
-                .map(s => s.src).slice(0, 15);
+                .map(s => s.src).slice(0, HARD_CAP);
 
             const domains = [...new Set(
                 [...document.documentElement.outerHTML.matchAll(
                     /https?:\\/\\/([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/g
                 )].map(m => m[1])
-            )].sort().slice(0, 30);
+            )].sort();
+
+            // 푸터 업체 정보 추출 (회사명/사업자번호/주소/전화/이메일)
+            const footerEl = document.querySelector('footer, [class*="footer" i], [id*="footer" i]');
+            const footerText = footerEl ? footerEl.innerText.slice(0, 3000) : '';
+
+            // 이메일/전화번호/사업자번호 패턴 추출 (전체 페이지)
+            const fullText = document.body ? document.body.innerText.slice(0, 20000) : '';
+            const emails = [...new Set(
+                (fullText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g) || [])
+            )];
+            const phones = [...new Set(
+                (fullText.match(/\\+?\\d{1,3}[-\\s]?\\d{2,4}[-\\s]?\\d{3,4}[-\\s]?\\d{3,4}/g) || [])
+            )].slice(0, 20);
+
+            // 사회공학적 조작 키워드 감지
+            const scamPatterns = [];
+            const scamKeywords = [
+                ['한정', '한정 수량'], ['남음', '남았'], ['단 ', '단 N개'],
+                ['카운트다운', '카운트다운 타이머'], ['타이머', '타이머'],
+                ['판매 완료', '판매 완료'], ['구매 중', '실시간 구매 중'],
+                ['남은 ', '남은 시간'], ['긴급', '긴급 할인'],
+                ['무료 배송', '무료 배송'], ['할인', '파격 할인'],
+                ['安全验证', '중국어 CAPTCHA'], ['滑块', '중국어 슬라이더 CAPTCHA']
+            ];
+            for (const [k, label] of scamKeywords) {
+                if (fullText.includes(k)) scamPatterns.push(label);
+            }
+
+            // 통합사회신용코드 (중국 사업자) / 대한민국 사업자 번호 추출
+            const bizCodes = [...new Set([
+                ...(fullText.match(/\\b9\\d{17}[A-Z0-9]\\b/g) || []),  // 중국 통합사회신용코드 18자리
+                ...(fullText.match(/\\b\\d{3}-?\\d{2}-?\\d{5}\\b/g) || [])  // 한국 사업자번호
+            ])];
 
             return {
                 title: document.title, url: location.href,
                 links, buttons, inputs, iframes, forms,
                 external_scripts: scripts, external_domains: domains,
+                footer_text: footerText,
+                emails_on_page: emails,
+                phones_on_page: phones,
+                business_codes: bizCodes,
+                scam_patterns: scamPatterns,
+                page_text_preview: fullText.slice(0, 2000),
             };
         }""")
     except Exception as e:
@@ -185,12 +226,20 @@ def extract_snapshot(page, net_log: list, name: str) -> dict:
     _last_elements["buttons"] = list(dom.get("buttons", []))
     _last_elements["inputs"] = list(dom.get("inputs", []))
 
-    recent_net = net_log[-20:] if net_log else []
+    # 현재 스냅샷 이후의 네트워크 요청 전부 전달 (축약 없음)
+    # — tracking pixel / statistics / API 호출 URL을 AI가 분석에 활용
+    all_net = list(net_log)
+    # tracking pixel만 별도로 태그 (.gif, statistics, tracker, beacon, collect, pixel)
+    tracking = [r for r in all_net if re.search(
+        r"\.gif|/statistics/|/tracker|/beacon|/collect|/pixel|/md\.gif",
+        r.get("url", ""), re.I
+    )]
 
     return {
         "screenshot": screenshot_path,
         "dom": dom,
-        "network_requests": recent_net,
+        "network_requests": all_net,
+        "tracking_requests": tracking,
     }
 
 

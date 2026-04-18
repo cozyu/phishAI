@@ -116,8 +116,20 @@ class AIDynamicAnalyzer:
         inputs_seen: list[dict] = []
         forms_seen: list[dict] = []
         external_domains: set[str] = set()
+        external_scripts: set[str] = set()
+        tracking_requests: list[dict] = []
+        all_network: list[dict] = []
+        business_info: dict = {
+            "footer_texts": [],
+            "emails": set(),
+            "phones": set(),
+            "business_codes": set(),
+        }
+        scam_patterns_seen: set[str] = set()
         self._accumulate(initial, visited_pages, iframes_seen, inputs_seen,
-                         forms_seen, external_domains)
+                         forms_seen, external_domains, external_scripts,
+                         tracking_requests, all_network, business_info,
+                         scam_patterns_seen)
 
         for step in range(self.MAX_STEPS):
             # 타임아웃 체크
@@ -146,20 +158,15 @@ class AIDynamicAnalyzer:
             # done 호출 = 분석 완료
             if response.get("done"):
                 print(f"  [AI동적분석] 분석 완료 ({step + 1}스텝)")
-                return {
-                    "site_type": response.get("site_type", "unknown"),
-                    "findings": response.get("findings", ""),
-                    "severity": response.get("severity", "medium"),
-                    "rounds_completed": step + 1,
-                    "history": history,
-                    "victim_flow": {
-                        "visited_pages": visited_pages,
-                        "iframes": iframes_seen,
-                        "input_fields": inputs_seen,
-                        "forms": forms_seen,
-                        "external_domains": sorted(external_domains),
-                    },
-                }
+                return self._build_final(
+                    response.get("site_type", "unknown"),
+                    response.get("findings", ""),
+                    response.get("severity", "medium"),
+                    step + 1, history,
+                    visited_pages, iframes_seen, inputs_seen, forms_seen,
+                    external_domains, external_scripts, tracking_requests,
+                    all_network, business_info, scam_patterns_seen,
+                )
 
             # Function Call 처리
             fc = response.get("function_call")
@@ -187,9 +194,11 @@ class AIDynamicAnalyzer:
                 print(f"  [AI동적분석] Docker 오류: {result_snapshot['error']}")
                 break
 
-            # victim_flow 증거 누적 (새 스냅샷의 iframes/inputs/forms/domains)
+            # victim_flow 증거 누적 (새 스냅샷의 iframes/inputs/forms/domains/tracking)
             self._accumulate(result_snapshot, visited_pages, iframes_seen,
-                             inputs_seen, forms_seen, external_domains)
+                             inputs_seen, forms_seen, external_domains,
+                             external_scripts, tracking_requests, all_network,
+                             business_info, scam_patterns_seen)
 
             # 실행 결과를 히스토리에 기록
             action_result = result_snapshot.get("action_result", {})
@@ -217,24 +226,50 @@ class AIDynamicAnalyzer:
 
         # 최대 스텝 도달 — 수집된 정보로 결과 구성
         print(f"  [AI동적분석] 최대 스텝 도달 ({self.MAX_STEPS})")
+        return self._build_final(
+            "unknown",
+            f"{len(history)}스텝 탐색 완료, done 미호출",
+            "medium", len(history), history,
+            visited_pages, iframes_seen, inputs_seen, forms_seen,
+            external_domains, external_scripts, tracking_requests,
+            all_network, business_info, scam_patterns_seen,
+        )
+
+    @staticmethod
+    def _build_final(site_type, findings, severity, rounds, history,
+                     visited_pages, iframes, inputs, forms,
+                     domains, scripts, tracking, all_net,
+                     business_info, scam_patterns) -> dict:
         return {
-            "site_type": "unknown",
-            "findings": f"{len(history)}스텝 탐색 완료, done 미호출",
-            "severity": "medium",
-            "rounds_completed": len(history),
+            "site_type": site_type,
+            "findings": findings,
+            "severity": severity,
+            "rounds_completed": rounds,
             "history": history,
             "victim_flow": {
                 "visited_pages": visited_pages,
-                "iframes": iframes_seen,
-                "input_fields": inputs_seen,
-                "forms": forms_seen,
-                "external_domains": sorted(external_domains),
+                "iframes": iframes,
+                "input_fields": inputs,
+                "forms": forms,
+                "external_domains": sorted(domains),
+                "external_scripts": sorted(scripts),
+                "tracking_requests": tracking,
+                "all_network_requests": all_net,
+                "business_info": {
+                    "footer_texts": business_info.get("footer_texts", []),
+                    "emails": sorted(business_info.get("emails", set())),
+                    "phones": sorted(business_info.get("phones", set())),
+                    "business_codes": sorted(business_info.get("business_codes", set())),
+                },
+                "scam_patterns": sorted(scam_patterns),
             },
         }
 
     @staticmethod
     def _accumulate(snapshot: dict, visited_pages: list, iframes: list,
-                    inputs: list, forms: list, domains: set) -> None:
+                    inputs: list, forms: list, domains: set,
+                    scripts: set, tracking: list, all_net: list,
+                    business_info: dict, scam_patterns: set) -> None:
         """스냅샷의 victim_flow 증거를 누적한다. 중복 항목은 제거."""
         dom = snapshot.get("dom", {})
         page_url = dom.get("url", "")
@@ -242,13 +277,15 @@ class AIDynamicAnalyzer:
             visited_pages.append({
                 "url": page_url,
                 "title": dom.get("title", ""),
+                "page_text_preview": dom.get("page_text_preview", ""),
             })
 
         for ifr in dom.get("iframes", []) or []:
             src = ifr.get("src", "")
             if src and src != "about:blank" and not any(i.get("src") == src for i in iframes):
                 iframes.append({
-                    "src": src, "id": ifr.get("id", ""),
+                    "src": src,
+                    "id": ifr.get("id", ""),
                     "name": ifr.get("name", ""),
                     "on_page": page_url,
                 })
@@ -282,6 +319,45 @@ class AIDynamicAnalyzer:
         for d in dom.get("external_domains", []) or []:
             if d:
                 domains.add(d)
+
+        for s in dom.get("external_scripts", []) or []:
+            if s:
+                scripts.add(s)
+
+        # 푸터/업체 정보
+        ft = dom.get("footer_text", "") or ""
+        if ft and ft not in business_info["footer_texts"]:
+            business_info["footer_texts"].append(ft)
+        for e in dom.get("emails_on_page", []) or []:
+            business_info["emails"].add(e)
+        for p in dom.get("phones_on_page", []) or []:
+            business_info["phones"].add(p)
+        for c in dom.get("business_codes", []) or []:
+            business_info["business_codes"].add(c)
+
+        # 사회공학적 조작 패턴
+        for sp in dom.get("scam_patterns", []) or []:
+            scam_patterns.add(sp)
+
+        # 네트워크 요청 (tracking pixel / API / 전체)
+        for req in snapshot.get("network_requests", []) or []:
+            url = req.get("url", "")
+            if url and not any(r.get("url") == url for r in all_net):
+                all_net.append({
+                    "method": req.get("method", "GET"),
+                    "url": url,
+                    "type": req.get("type", ""),
+                    "on_page": page_url,
+                })
+        for treq in snapshot.get("tracking_requests", []) or []:
+            url = treq.get("url", "")
+            if url and not any(t.get("url") == url for t in tracking):
+                tracking.append({
+                    "method": treq.get("method", "GET"),
+                    "url": url,
+                    "type": treq.get("type", ""),
+                    "on_page": page_url,
+                })
 
     def _read_snapshot(self, proc: subprocess.Popen) -> dict:
         """Docker 컨테이너에서 스냅샷 JSON 1줄 읽기"""
