@@ -19,25 +19,37 @@ from pathlib import Path
 
 
 def md_to_html(md_text: str) -> str:
-    """마크다운을 HTML로 변환 (외부 라이브러리 없이)"""
+    """마크다운을 HTML로 변환 (외부 라이브러리 없이). ```mermaid 블록은 mermaid.js용 div로 변환."""
     lines = md_text.split("\n")
     out = []
     in_code = False
+    in_mermaid = False
     in_table = False
     in_ul = False
     in_ol = False
     in_blockquote = False
 
     for line in lines:
-        # 코드 블록
+        # 코드 블록 시작/종료
         if line.strip().startswith("```"):
-            if in_code:
+            if in_mermaid:
+                out.append("</div>")
+                in_mermaid = False
+            elif in_code:
                 out.append("</code></pre>")
                 in_code = False
             else:
-                lang = line.strip().replace("```", "").strip()
-                out.append(f'<pre class="code-block"><code>')
-                in_code = True
+                lang = line.strip().replace("```", "").strip().lower()
+                if lang == "mermaid":
+                    out.append('<div class="mermaid">')
+                    in_mermaid = True
+                else:
+                    out.append(f'<pre class="code-block"><code>')
+                    in_code = True
+            continue
+        if in_mermaid:
+            # mermaid 문법은 escape하지 않고 그대로 (mermaid.js가 파싱)
+            out.append(line)
             continue
         if in_code:
             out.append(html.escape(line))
@@ -249,6 +261,15 @@ blockquote {
 strong { color: #c0392b; }
 a { color: #2980b9; text-decoration: none; }
 .list-item { margin: 2px 0; padding-left: 15px; }
+.mermaid {
+    text-align: center;
+    margin: 20px 0;
+    page-break-inside: avoid;
+    background: #fafafa;
+    padding: 15px;
+    border-radius: 6px;
+}
+.mermaid svg { max-width: 100%; height: auto; }
 """
 
 
@@ -270,6 +291,21 @@ def convert(md_path: str, output_path: str = None) -> str:
 <head>
 <meta charset="UTF-8">
 <style>{CSS}</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {{
+    if (window.mermaid) {{
+      mermaid.initialize({{
+        startOnLoad: true,
+        theme: 'default',
+        flowchart: {{ htmlLabels: true, curve: 'linear' }},
+        securityLevel: 'loose',
+      }});
+      // 렌더 완료 신호 (Chrome이 idle로 판단하도록)
+      window.mermaidReady = true;
+    }}
+  }});
+</script>
 </head>
 <body>
 {body_html}
@@ -296,16 +332,19 @@ def convert(md_path: str, output_path: str = None) -> str:
         sys.exit(1)
 
     print(f"[*] PDF 변환 중... ({chrome})")
+    # mermaid.js 비동기 렌더 완료를 기다리기 위해 virtual-time-budget 사용
     result = subprocess.run([
         chrome,
-        "--headless",
+        "--headless=new",
         "--disable-gpu",
         "--no-sandbox",
         "--disable-software-rasterizer",
+        "--run-all-compositor-stages-before-draw",
+        "--virtual-time-budget=10000",
         f"--print-to-pdf={output_path}",
         "--print-to-pdf-no-header",
         html_path,
-    ], capture_output=True, text=True, timeout=30)
+    ], capture_output=True, text=True, timeout=60)
 
     # 임시 파일 정리
     Path(html_path).unlink(missing_ok=True)
